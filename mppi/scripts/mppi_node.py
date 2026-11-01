@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import partial
 
 import jax
@@ -14,6 +14,8 @@ from utils import calc_interpolated_ref_trajectory
 # TODO CHECK: include needed ROS msg type headers and libraries
 import os
 from nav_msgs.msg import Odometry
+from geometry_msgs.msg import Point
+from visualization_msgs.msg import Marker, MarkerArray
 from ament_index_python.packages import get_package_share_directory
 
 
@@ -25,14 +27,20 @@ class MPPIConfig:
     T: int = 1024  # number of sampled control sequences
     H: int = 20  # horizon length
     DT: float = 0.05  # time step [s]
-    INTEGRATOR: str = "euler"  # "euler" or "rk4" (bonus)
+    INTEGRATOR: str = "rk4"  # "euler" or "rk4" (bonus)
+    SAMPLING: str = "truncated"  # "clip", or bonus: "truncated" (normal) or "uniform"
+    COV_UPDATE: bool = True  # bonus: adapt the sampling std of each step
 
     # ---------------------------------------------------
     # TODO: you may need to tune the following parameters
-    LAMBDA: float = 0.01  # temperature
-    U_STD: tuple = (1.0, 0.1)  # std of the sampled inputs [a, delta]
-    Q: tuple = (5.0, 5.0, 1.0, 1.0)  # state error cost [x, y, yaw, v]
-    Qf: tuple = (5.0, 5.0, 1.0, 1.0)  # final state error cost [x, y, yaw, v]
+    LAMBDA: float = 0.1  # temperature
+    U_STD: tuple = (1.5, 0.15)  # std of the sampled inputs [a, delta]
+    NOISE_RHO: float = 0.9  # correlation of the sampled noise from one step to the next
+    U_STD_MIN: tuple = (0.3, 0.03)  # covariance update: floor of the std
+    COV_ALPHA: float = 0.5  # covariance update: blend of the new std
+    # cost() weights the position error along the reference (lag) and across it (lateral)
+    Q: tuple = (1.0, 20.0, 2.0, 1.0)  # state error cost [lag, lateral, yaw, v]
+    Qf: tuple = (2.0, 40.0, 4.0, 1.0)  # final state error cost [lag, lateral, yaw, v]
     R: tuple = (0.01, 0.01)  # input cost [a, delta]
     Rd: tuple = (0.01, 1.0)  # input difference cost [a, delta]
     # ---------------------------------------------------
@@ -97,8 +105,12 @@ def step(x, u, cfg):
     Discretized dynamics F(x, u): the state after DT, holding u constant
     """
     if cfg.INTEGRATOR == "rk4":
-        return step_rk4(x, u, cfg)
-    return step_euler(x, u, cfg)
+        x_next = step_rk4(x, u, cfg)
+    else:
+        x_next = step_euler(x, u, cfg)
+    # the published speed is clipped to [MIN_SPEED, MAX_SPEED], so the rollouts
+    # must be too: otherwise a car at rest plans to reverse and steers backwards
+    return x_next.at[3].set(jnp.clip(x_next[3], cfg.MIN_SPEED, cfg.MAX_SPEED))
 
 
 def simulate(x0, U, cfg):
@@ -156,6 +168,16 @@ def cost(X, U, ref, cfg):
 
     error = error.at[:, 2].set(yaw_error)
 
+    # position error in the frame of the reference: [lag, lateral]. From rest the
+    # reference runs ahead of the car, and a plain x/y error is then all lag,
+    # which only the acceleration can fix: weighting the lateral error on its
+    # own keeps a clear signal for the steering
+    cos_ref = jnp.cos(ref[1:, 2])
+    sin_ref = jnp.sin(ref[1:, 2])
+    lag = cos_ref * error[:, 0] + sin_ref * error[:, 1]
+    lateral = -sin_ref * error[:, 0] + cos_ref * error[:, 1]
+    error = error.at[:, 0].set(lag).at[:, 1].set(lateral)
+
     Q = jnp.array(cfg.Q)
     Qf = jnp.array(cfg.Qf)
     R = jnp.array(cfg.R)
@@ -178,10 +200,93 @@ def cost(X, U, ref, cfg):
     return state_cost + input_cost + input_difference_cost
 
 
+def sample_controls(key, U, U_std, cfg):
+    """
+    Sample T control sequences around U, inside the input bounds
+    :param U: mean control sequence, shape (H, NU)
+    :param U_std: std of each input at each step, shape (H, NU)
+    :return: sampled control sequences, shape (T, H, NU)
+    """
+    lower = jnp.array((cfg.MIN_ACCEL, cfg.MIN_STEER))
+    upper = jnp.array((cfg.MAX_ACCEL, cfg.MAX_STEER))
+
+    # standard normal noise, correlated over time: z_t = rho z_{t-1} + sqrt(1 - rho^2) e_t.
+    # At rest the steering of the first step has no effect (yaw rate = v tan(delta) / L),
+    # so with white noise its update is pure noise; correlated over time, it follows
+    # the steering of the next steps, which does move the car
+    eps = jax.random.normal(key, (cfg.H, cfg.T, cfg.NU))
+
+    def ar1(z_prev, e):
+        z = cfg.NOISE_RHO * z_prev + jnp.sqrt(1.0 - cfg.NOISE_RHO ** 2) * e
+        return z, z
+
+    _, z = jax.lax.scan(ar1, eps[0], eps[1:])
+    z = jnp.concatenate((eps[:1], z), axis=0).transpose(1, 0, 2)  # (T, H, NU)
+
+    if cfg.SAMPLING == "truncated":
+        # Bonus: a Gaussian truncated to the bounds, so every sample is a valid
+        # input without piling up on the bounds as clipping does. The inverse CDF
+        # maps each N(0, 1) of z to N(0, 1) truncated to [lo, hi], and keeps
+        # the correlation over time
+        lo = jax.scipy.stats.norm.cdf((lower - U) / U_std)
+        hi = jax.scipy.stats.norm.cdf((upper - U) / U_std)
+        p = lo + jax.scipy.stats.norm.cdf(z) * (hi - lo)
+        z = jax.scipy.special.ndtri(jnp.clip(p, 1e-6, 1.0 - 1e-6))
+        return jnp.clip(U + z * U_std, lower, upper)
+    if cfg.SAMPLING == "uniform":
+        # Bonus: uniform on [U - sqrt(3) std, U + sqrt(3) std] (same std as the
+        # Gaussian) truncated to the bounds; Phi(z) is uniform on [0, 1]
+        lo = jnp.maximum(lower, U - jnp.sqrt(3.0) * U_std)
+        hi = jnp.minimum(upper, U + jnp.sqrt(3.0) * U_std)
+        return lo + jax.scipy.stats.norm.cdf(z) * (hi - lo)
+    return jnp.clip(U + z * U_std, lower, upper)
+
+
+def mppi_update(key, U, U_std, x0, ref, cfg):
+    """
+    Steps 1 to 5 of MPPI (README Section IV), shared by mppi_step and mppi_step_cov
+    :return: U_new (H, NU), U_std_new (H, NU), X_samples (T, H+1, NX), weights (T, H)
+    """
+    # 1. Sample: T control sequences around U, inside the input bounds
+    U_samples = sample_controls(key, U, U_std, cfg)
+
+    # 2. Simulate: roll out all T sequences from x0
+    X_samples = rollout(x0, U_samples, cfg)
+
+    # 3. Score: the cost of each step of each sample, then the cost-to-go
+    #    S[k, t] = c[k, t] + ... + c[k, H-1]
+    C = jax.vmap(cost, in_axes=(0, 0, None, None))(
+        X_samples, U_samples, ref, cfg
+    )
+    S = jnp.flip(jnp.cumsum(jnp.flip(C, axis=1), axis=1), axis=1)
+
+    # 4. Weight: normalize S[:, t] to [0, 1] over the samples, then softmax
+    S_min = jnp.min(S, axis=0, keepdims=True)
+    S_max = jnp.max(S, axis=0, keepdims=True)
+    S_normalized = (S - S_min) / (S_max - S_min + 1e-6)
+    weights = jax.nn.softmax(-S_normalized / cfg.LAMBDA, axis=0)
+
+    # 5. Update: U_new[t] = sum_k w[k, t] * u_k[t]
+    U_new = jnp.sum(weights[:, :, jnp.newaxis] * U_samples, axis=0)
+
+    # Bonus: covariance update, Sigma_t = sum_k w[k, t] (u_k[t] - U_t)(u_k[t] - U_t)^T.
+    # The truncated sampler draws each input independently, so it keeps the
+    # diagonal of Sigma_t: the weighted variance of each input. The std is
+    # blended with the previous one and floored so the search never collapses.
+    variance = jnp.sum(
+        weights[:, :, jnp.newaxis] * (U_samples - U_new) ** 2,
+        axis=0
+    )
+    U_std_new = (1.0 - cfg.COV_ALPHA) * U_std + cfg.COV_ALPHA * jnp.sqrt(variance)
+    U_std_new = jnp.clip(U_std_new, jnp.array(cfg.U_STD_MIN), jnp.array(cfg.U_STD))
+
+    return U_new, U_std_new, X_samples, weights
+
+
 @partial(jax.jit, static_argnames=("cfg",))
 def mppi_step(key, U, x0, ref, cfg):
     """
-    One MPPI update (README Section IV)
+    One MPPI update (README Section IV) with the fixed std cfg.U_STD
     :param key: JAX random key, a new one at every call
     :param U: mean control sequence, already warm started, shape (H, NU)
     :param x0: current state, shape (NX,)
@@ -190,64 +295,20 @@ def mppi_step(key, U, x0, ref, cfg):
     :return: the new mean control sequence, shape (H, NU),
              the sampled trajectories (for visualization), shape (T, H+1, NX),
              and the weights of the samples at each step, shape (T, H)
-    For the covariance update (bonus), you may change the inputs and outputs.
     """
-    # --------------------------------------------------------
-    # TODO 1. Sample: T control sequences around U with noise of std cfg.U_STD
-    #         (jax.random.normal(key, shape)), clipped to the input bounds.
-    #         Bonus: sample from a truncated distribution instead of clipping
-    noise = jax.random.normal(
-        key,
-        (cfg.T, cfg.H, cfg.NU)
-    )
-    noise = noise * jnp.array(cfg.U_STD)
-
-    U_samples = U[jnp.newaxis, :, :] + noise
-
-    U_samples = U_samples.at[:, :, 0].set(
-        jnp.clip(U_samples[:, :, 0], cfg.MIN_ACCEL, cfg.MAX_ACCEL)
-    )
-    U_samples = U_samples.at[:, :, 1].set(
-        jnp.clip(U_samples[:, :, 1], cfg.MIN_STEER, cfg.MAX_STEER)
-    )
-
-    # TODO 2. Simulate: roll out all T sequences from x0
-    X_samples = rollout(x0, U_samples, cfg)
-
-    # TODO 3. Score: the cost of each step of each sample, c of shape (T, H)
-    #         (vectorize cost() with jax.vmap), then the cost-to-go
-    #         S[k, t] = c[k, t] + ... + c[k, H-1] (cumsum of the reversed steps)
-    C = jax.vmap(cost, in_axes=(0, 0, None, None))(
-        X_samples, U_samples, ref, cfg
-    )
-
-    S = jnp.flip(
-        jnp.cumsum(jnp.flip(C, axis=1), axis=1),
-        axis=1
-    )
-
-    # TODO 4. Weight: for each step t, normalize S[:, t] to [0, 1] over the
-    #         samples, (S - min) / (max - min + 1e-6), then take its softmax
-    #         over the samples, w[:, t] = softmax(-S[:, t] / cfg.LAMBDA)
-    S_min = jnp.min(S, axis=0, keepdims=True)
-    S_max = jnp.max(S, axis=0, keepdims=True)
-
-    S_normalized = (S - S_min) / (S_max - S_min + 1e-6)
-
-    weights = jax.nn.softmax(
-        -S_normalized / cfg.LAMBDA,
-        axis=0
-    )
-
-    # TODO 5. Update: U_new[t] = sum over the samples k of w[k, t] * u_k[t]
-    #         Bonus: also update the covariance
-    U_new = jnp.sum(
-        weights[:, :, jnp.newaxis] * U_samples,
-        axis=0
-    )
-
-    # --------------------------------------------------------
+    U_std = jnp.broadcast_to(jnp.array(cfg.U_STD), (cfg.H, cfg.NU))
+    U_new, _, X_samples, weights = mppi_update(key, U, U_std, x0, ref, cfg)
     return U_new, X_samples, weights
+
+
+@partial(jax.jit, static_argnames=("cfg",))
+def mppi_step_cov(key, U, U_std, x0, ref, cfg):
+    """
+    Bonus: one MPPI update that also updates the sampling std of each step
+    :param U_std: std of each input at each step, already warm started, shape (H, NU)
+    :return: U_new (H, NU), U_std_new (H, NU), X_samples (T, H+1, NX), weights (T, H)
+    """
+    return mppi_update(key, U, U_std, x0, ref, cfg)
 
 
 class MPPI(Node):
@@ -263,11 +324,12 @@ class MPPI(Node):
 
         # TODO: create ROS subscribers and publishers
         #       use MPPI as a tracker (similar to pure pursuit)
+        # queue of 1: always run MPPI from the newest pose, never a stale one
         self.odom_subscriber = self.create_subscription(
             Odometry,
             '/ego_racecar/odom',
             self.odom_callback,
-            10
+            1
         )
         self.drive_publisher = self.create_publisher(
             AckermannDriveStamped,
@@ -283,20 +345,43 @@ class MPPI(Node):
             'waypoints',
             track + '.csv'
         )
+        # columns x, y, yaw, v
         self.waypoints = np.loadtxt(
             waypoint_path,
             delimiter=',',
             skiprows=1
         )
 
-        self.config = MPPIConfig()
+        # per-track overrides of MPPIConfig from the launch file, e.g. 'max_speed': 6.0
+        overrides = {}
+        for field in ('MAX_SPEED', 'LAMBDA', 'INTEGRATOR', 'SAMPLING', 'COV_UPDATE'):
+            default = getattr(MPPIConfig, field)
+            self.declare_parameter(field.lower(), default)
+            overrides[field] = type(default)(self.get_parameter(field.lower()).value)
+        self.config = replace(MPPIConfig(), **overrides)
+        # the reference must not ask for more than the car is allowed to do
+        self.waypoints[:, 3] = np.minimum(self.waypoints[:, 3], self.config.MAX_SPEED)
+
         self.U = jnp.zeros((self.config.H, self.config.NU))  # mean control sequence
+        self.U_std = jnp.broadcast_to(  # sampling std of each step (covariance update)
+            jnp.array(self.config.U_STD), (self.config.H, self.config.NU))
         self.key = jax.random.PRNGKey(0)
+        self.last_stamp = None  # stamp of the last odometry, for the warm start
+        self.last_x0 = None  # state at the last odometry
+
+        # debugging only: sampled rollouts and the plan in RViz, on /mppi/markers
+        self.declare_parameter('visualize', False)
+        self.visualize = self.get_parameter('visualize').value
+        if self.visualize:
+            self.marker_publisher = self.create_publisher(MarkerArray, '/mppi/markers', 1)
 
         # jax.jit compiles mppi_step the first time it is called, which takes a
         # few seconds: call it once here so the car does not wait for it
         mppi_step(self.key, self.U, np.zeros(self.config.NX),
                   np.zeros((self.config.H + 1, self.config.NX)), self.config)
+        mppi_step_cov(self.key, self.U, self.U_std, np.zeros(self.config.NX),
+                      np.zeros((self.config.H + 1, self.config.NX)), self.config)
+        self.get_logger().info(f'MPPI ready on {track}: {self.config}')
 
     def odom_callback(self, odom_msg):
         # TODO: extract the state x0 = [p_x, p_y, yaw, v] from the ROS msg
@@ -332,21 +417,44 @@ class MPPI(Node):
         # TODO: warm start: the first input of self.U was applied at the last
         #       step, so shift self.U one step forward (drop the first input
         #       and repeat the last one)
-        self.U = jnp.concatenate(
-            (self.U[1:], self.U[-1:]),
-            axis=0
-        )
+        #       Odometry comes much faster than DT (250 Hz in the simulator), so
+        #       shift by the time since the last callback instead of a whole step
+        stamp = odom_msg.header.stamp.sec + 1e-9 * odom_msg.header.stamp.nanosec
+        elapsed = self.config.DT if self.last_stamp is None else stamp - self.last_stamp
+        elapsed = float(np.clip(elapsed, 0.0, self.config.DT))
+        self.last_stamp = stamp
+        if self.last_x0 is not None and np.hypot(*(x0[:2] - self.last_x0[:2])) > 1.0:
+            # the car jumped (new start pose): the old plan is meaningless here
+            self.U = jnp.zeros((self.config.H, self.config.NU))
+            self.U_std = jnp.broadcast_to(
+                jnp.array(self.config.U_STD), (self.config.H, self.config.NU))
+        self.last_x0 = x0
+        self.U = self.shift(self.U, elapsed, np.asarray(self.U[-1]))
+
+        if self.config.COV_UPDATE:
+            # shift the std like U; the new last step starts from the prior std
+            self.U_std = self.shift(self.U_std, elapsed, np.array(self.config.U_STD))
 
         # a new random key at every step, so MPPI draws new samples
         self.key, subkey = jax.random.split(self.key)
         # TODO: run MPPI, keep the new mean control sequence in self.U
-        self.U, X_samples, weights = mppi_step(
-            subkey,
-            self.U,
-            x0,
-            ref,
-            self.config
-        )
+        if self.config.COV_UPDATE:
+            self.U, self.U_std, X_samples, weights = mppi_step_cov(
+                subkey,
+                self.U,
+                self.U_std,
+                x0,
+                ref,
+                self.config
+            )
+        else:
+            self.U, X_samples, weights = mppi_step(
+                subkey,
+                self.U,
+                x0,
+                ref,
+                self.config
+            )
 
         # TODO: publish drive message: steering delta_0, speed v + a_0 * DT
         #       (float() turns a JAX array into a number)
@@ -365,7 +473,54 @@ class MPPI(Node):
 
         # TODO (optional, debugging only): visualize the reference, the trajectory
         #       of self.U and a few sampled trajectories, colored by their weight
-        pass
+        if self.visualize:
+            self.publish_markers(x0, ref, X_samples, weights)
+
+    def publish_markers(self, x0, ref, X_samples, weights, n_samples=50):
+        """
+        Debugging only: the reference (green), the plan of self.U (red) and
+        n_samples sampled rollouts, from white (low weight) to blue (high weight)
+        """
+        X_samples = np.asarray(X_samples[:n_samples])
+        w = np.asarray(weights[:n_samples, 0])
+        w = w / (w.max() + 1e-12)
+        plan = np.asarray(simulate(jnp.asarray(x0), self.U, self.config))
+
+        def line(i, points, r, g, b, width):
+            marker = Marker()
+            marker.header.frame_id = 'map'
+            marker.header.stamp = self.get_clock().now().to_msg()
+            marker.ns = 'mppi'
+            marker.id = i
+            marker.type = Marker.LINE_STRIP
+            marker.scale.x = width
+            marker.color.r, marker.color.g, marker.color.b = float(r), float(g), float(b)
+            marker.color.a = 1.0
+            marker.points = [Point(x=float(p[0]), y=float(p[1])) for p in points]
+            return marker
+
+        markers = MarkerArray()
+        markers.markers.append(line(0, ref, 0.0, 1.0, 0.0, 0.05))
+        markers.markers.append(line(1, plan, 1.0, 0.0, 0.0, 0.05))
+        for k in range(len(X_samples)):
+            markers.markers.append(
+                line(2 + k, X_samples[k], 1.0 - w[k], 1.0 - w[k], 1.0, 0.01))
+        self.marker_publisher.publish(markers)
+
+    def shift(self, seq, elapsed, fill):
+        """
+        Warm start: seq[k] is planned for time k * DT, so after `elapsed` seconds
+        the new seq[k] is the old one at k * DT + elapsed, linearly interpolated.
+        With elapsed = DT, this drops the first step and appends `fill`.
+        :param seq: sequence over the horizon, shape (H, NU)
+        :param fill: value after the end of the horizon, shape (NU,)
+        """
+        seq = np.asarray(seq)
+        grid = np.arange(self.config.H) * self.config.DT
+        return jnp.array(np.column_stack([
+            np.interp(grid + elapsed, grid, seq[:, j], right=fill[j])
+            for j in range(seq.shape[1])
+        ]))
 
     def calc_ref_trajectory(self, x0, cx, cy, cyaw, cv):
         """
@@ -382,7 +537,9 @@ class MPPI(Node):
             x0[0], x0[1],
             cx, cy, cyaw, cv,
             self.config.DT,
-            self.config.H
+            self.config.H,
+            v0=x0[3],
+            max_accel=self.config.MAX_ACCEL
         )
 
 

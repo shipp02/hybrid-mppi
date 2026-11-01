@@ -51,7 +51,7 @@ def nearest_point(point, trajectory):
     return projections[i], dists[i], t[i], i
 
 
-def calc_interpolated_ref_trajectory(x, y, cx, cy, cyaw, cv, dt, H):
+def calc_interpolated_ref_trajectory(x, y, cx, cy, cyaw, cv, dt, H, v0=None, max_accel=None):
     """
     Calculate the reference trajectory for the next H steps.
 
@@ -68,6 +68,10 @@ def calc_interpolated_ref_trajectory(x, y, cx, cy, cyaw, cv, dt, H):
         cv (numpy.ndarray): velocities at waypoints
         dt (float): Time step
         H (int): Horizon (returns H+1 points)
+        v0 (float, optional): current speed. With max_accel, the reference
+            speed ramps up from v0 at max_accel instead of jumping to the
+            waypoints' speed, so the reference stays where the car can reach
+        max_accel (float, optional): acceleration of that ramp
 
     Returns:
         ref_traj (numpy.ndarray, (H+1, 4)): reference states [x, y, yaw, v],
@@ -84,12 +88,19 @@ def calc_interpolated_ref_trajectory(x, y, cx, cy, cyaw, cv, dt, H):
     # Progress along the waypoints, in units of segments from ind_current
     t_list = np.zeros(H + 1)
     t_list[0] = t_current
+    speeds = np.zeros(H + 1)
     speed = (1.0 - t_current) * cv[ind_current] + t_current * cv[(ind_current + 1) % ncourse]
+    if v0 is not None and max_accel is not None:
+        speed = min(speed, v0)
+    speeds[0] = speed
     for i in range(1, H + 1):
         t_list[i] = t_list[i - 1] + speed * dt / dl
         t_frac = t_list[i] % 1.0
         seg = (int(t_list[i]) + ind_current) % ncourse
         speed = (1.0 - t_frac) * cv[seg] + t_frac * cv[(seg + 1) % ncourse]
+        if v0 is not None and max_accel is not None:
+            speed = min(speed, v0 + max_accel * i * dt)
+        speeds[i] = speed
 
     # Interpolate all states between waypoints ind and ind + 1
     ind = (np.floor(t_list).astype(int) + ind_current) % ncourse
@@ -101,5 +112,5 @@ def calc_interpolated_ref_trajectory(x, y, cx, cy, cyaw, cv, dt, H):
         (1.0 - t_frac) * cx[ind] + t_frac * cx[ind_next],
         (1.0 - t_frac) * cy[ind] + t_frac * cy[ind_next],
         cyaw[ind] + t_frac * yaw_diff,
-        (1.0 - t_frac) * cv[ind] + t_frac * cv[ind_next],
+        speeds,
     ))
