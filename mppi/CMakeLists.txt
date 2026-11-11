@@ -21,6 +21,7 @@ ament_python_install_package(${PROJECT_NAME})
 # Install Python executables
 install(PROGRAMS
   scripts/mppi_node.py
+  scripts/occupancy_grid.py
   scripts/utils.py
   DESTINATION lib/${PROJECT_NAME}
 )

@@ -15,7 +15,11 @@ EXECUTABLE = 'mppi_node.py'
 # `track` tells the skeleton which waypoints to load; add this track's values
 # for the other parameters your node declares, e.g. 'max_speed': 6.0, or give
 # it a full .yaml config file
-PARAMETERS = {'track': 'levine'}
+PARAMETERS = {
+    'track': 'levine',
+    'odom_topic' : '/ego_racecar/odom',
+    'visualize' : False
+}
 
 
 def generate_launch_description():

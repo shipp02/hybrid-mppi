@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from dataclasses import dataclass, replace
 from functools import partial
+import functools
 
 import jax
 import jax.numpy as jnp
@@ -10,18 +11,20 @@ from ackermann_msgs.msg import AckermannDriveStamped
 from rclpy.node import Node
 from rclpy.executors import ExternalShutdownException
 from utils import calc_interpolated_ref_trajectory
+import occupancy_grid as og
 
-# TODO CHECK: include needed ROS msg type headers and libraries
 import os
 from nav_msgs.msg import Odometry
 from geometry_msgs.msg import Point
 from visualization_msgs.msg import Marker, MarkerArray
+from sensor_msgs.msg import LaserScan
+from rclpy.time import Time
+from tf2_ros import Buffer, TransformListener, TransformException
 from ament_index_python.packages import get_package_share_directory
 
 
 @dataclass(frozen=True)
 class MPPIConfig:
-    # frozen so jax.jit can take it as a static argument: use tuples, not arrays
     NX: int = 4  # length of state vector: x = [p_x, p_y, yaw, v]
     NU: int = 2  # length of input vector: u = [a, delta]
     T: int = 1024  # number of sampled control sequences
@@ -144,21 +147,26 @@ def rollout(x0, U, cfg):
     return jax.vmap(simulate, in_axes=(None, 0, None))(x0, U, cfg)
 
 
-def cost(X, U, ref, cfg):
-    """
-    Cost of each step of one trajectory (README Section III.a): c[t] is the cost
-    of applying u_t and reaching x_{t+1}
-        c[t] = (x_{t+1} - ref_{t+1})^T Q (x_{t+1} - ref_{t+1})   (Qf for the last step)
-             + u_t^T R u_t
-             + (u_t - u_{t-1})^T Rd (u_t - u_{t-1})              (from t = 1)
-    :param X: states x_0 ... x_H, shape (H+1, NX)
-    :param U: inputs u_0 ... u_{H-1}, shape (H, NU)
-    :param ref: reference states, shape (H+1, NX)
-    :return: c, shape (H,)
-    """
-    # TODO: Q, Qf, R and Rd are diagonal: e^T Q e = sum(jnp.array(cfg.Q) * e**2)
-    # TODO: wrap the heading error to [-pi, pi]
-    # TODO: add your own penalties if you want, e.g. for going over cfg.MAX_SPEED
+def trajectory_to_car_frame(ref_traj, x, y, yaw):
+    """Convert states from world coordinates to car coordinates."""
+    ref_traj = jnp.asarray(ref_traj)
+    dx = ref_traj[:, 0] - x
+    dy = ref_traj[:, 1] - y
+    c, s = jnp.cos(yaw), jnp.sin(yaw)
+
+    local_yaw = jnp.arctan2(
+        jnp.sin(ref_traj[:, 2] - yaw),
+        jnp.cos(ref_traj[:, 2] - yaw),
+    )
+    return ref_traj.at[:, :3].set(
+        jnp.stack(
+            (c * dx + s * dy, -s * dx + c * dy, local_yaw),
+            axis=1,
+        )
+    )
+
+
+def cost(X, U, ref, cfg, grid_cfg, grid_precomps, grid_state):
     error = X[1:] - ref[1:]
 
     yaw_error = jnp.arctan2(
@@ -167,6 +175,18 @@ def cost(X, U, ref, cfg):
     )
 
     error = error.at[:, 2].set(yaw_error)
+    
+    # Map rollout trajectory into local car frame for collision/distance evaluation
+    local_traj = trajectory_to_car_frame(X[1:], X[0, 0], X[0, 1], X[0, 2])
+    
+    # Evaluate obstacle proximity using the precomputed JAX occupancy grid functions
+    obs_blocked = og.is_free_poses(grid_cfg, grid_state, local_traj)
+    obs_dist = og.find_distances(grid_cfg, grid_state, local_traj)
+    
+    # Example penalty weights for obstacles and collisions
+    # obs_cost = jnp.sum(jnp.where(obs_dist < grid_cfg.inflation_radius, 1e1, 0.0))
+    obs_cost = 0.0
+    obs_block_cost = jnp.sum(jnp.where(~obs_blocked, 1e1, 0.0))
 
     # position error in the frame of the reference: [lag, lateral]. From rest the
     # reference runs ahead of the car, and a plain x/y error is then all lag,
@@ -197,7 +217,7 @@ def cost(X, U, ref, cfg):
         axis=1
     )
 
-    return state_cost + input_cost + input_difference_cost
+    return state_cost + input_cost + input_difference_cost + obs_cost + obs_block_cost
 
 
 def sample_controls(key, U, U_std, cfg):
@@ -242,21 +262,14 @@ def sample_controls(key, U, U_std, cfg):
     return jnp.clip(U + z * U_std, lower, upper)
 
 
-def mppi_update(key, U, U_std, x0, ref, cfg):
-    """
-    Steps 1 to 5 of MPPI (README Section IV), shared by mppi_step and mppi_step_cov
-    :return: U_new (H, NU), U_std_new (H, NU), X_samples (T, H+1, NX), weights (T, H)
-    """
-    # 1. Sample: T control sequences around U, inside the input bounds
+def mppi_update(key, U, U_std, x0, ref, cfg, grid_cfg, grid_precomps, grid_state):
     U_samples = sample_controls(key, U, U_std, cfg)
 
     # 2. Simulate: roll out all T sequences from x0
     X_samples = rollout(x0, U_samples, cfg)
 
-    # 3. Score: the cost of each step of each sample, then the cost-to-go
-    #    S[k, t] = c[k, t] + ... + c[k, H-1]
-    C = jax.vmap(cost, in_axes=(0, 0, None, None))(
-        X_samples, U_samples, ref, cfg
+    C = jax.vmap(cost, in_axes=(0, 0, None, None, None, None, None))(
+        X_samples, U_samples, ref, cfg, grid_cfg, grid_precomps, grid_state
     )
     S = jnp.flip(jnp.cumsum(jnp.flip(C, axis=1), axis=1), axis=1)
 
@@ -283,32 +296,16 @@ def mppi_update(key, U, U_std, x0, ref, cfg):
     return U_new, U_std_new, X_samples, weights
 
 
-@partial(jax.jit, static_argnames=("cfg",))
-def mppi_step(key, U, x0, ref, cfg):
-    """
-    One MPPI update (README Section IV) with the fixed std cfg.U_STD
-    :param key: JAX random key, a new one at every call
-    :param U: mean control sequence, already warm started, shape (H, NU)
-    :param x0: current state, shape (NX,)
-    :param ref: reference states, shape (H+1, NX)
-    :param cfg: MPPIConfig
-    :return: the new mean control sequence, shape (H, NU),
-             the sampled trajectories (for visualization), shape (T, H+1, NX),
-             and the weights of the samples at each step, shape (T, H)
-    """
+@partial(jax.jit, static_argnames=("cfg", "grid_cfg", "grid_precomps"))
+def mppi_step(key, U, x0, ref, cfg, grid_cfg, grid_precomps, grid_state):
     U_std = jnp.broadcast_to(jnp.array(cfg.U_STD), (cfg.H, cfg.NU))
-    U_new, _, X_samples, weights = mppi_update(key, U, U_std, x0, ref, cfg)
+    U_new, _, X_samples, weights = mppi_update(key, U, U_std, x0, ref, cfg, grid_cfg, grid_precomps, grid_state)
     return U_new, X_samples, weights
 
 
-@partial(jax.jit, static_argnames=("cfg",))
-def mppi_step_cov(key, U, U_std, x0, ref, cfg):
-    """
-    Bonus: one MPPI update that also updates the sampling std of each step
-    :param U_std: std of each input at each step, already warm started, shape (H, NU)
-    :return: U_new (H, NU), U_std_new (H, NU), X_samples (T, H+1, NX), weights (T, H)
-    """
-    return mppi_update(key, U, U_std, x0, ref, cfg)
+@partial(jax.jit, static_argnames=("cfg", "grid_cfg", "grid_precomps"))
+def mppi_step_cov(key, U, U_std, x0, ref, cfg, grid_cfg, grid_precomps, grid_state):
+    return mppi_update(key, U, U_std, x0, ref, cfg, grid_cfg, grid_precomps, grid_state)
 
 
 class MPPI(Node):
@@ -320,22 +317,62 @@ class MPPI(Node):
         super().__init__('mppi_node')
         # launch/levine_launch.py sets track:=levine, launch/spielberg_launch.py track:=spielberg
         self.declare_parameter('track', 'levine')
+        self.declare_parameter('odom_topic', '')
         track = self.get_parameter('track').value
+        
+        overrides = {}
+        for field in ('MAX_SPEED', 'LAMBDA', 'INTEGRATOR', 'SAMPLING', 'COV_UPDATE'):
+            default = getattr(MPPIConfig, field)
+            self.declare_parameter(field.lower(), default)
+            overrides[field] = type(default)(self.get_parameter(field.lower()).value)
+        self.config = replace(MPPIConfig(), **overrides)
 
-        # TODO: create ROS subscribers and publishers
-        #       use MPPI as a tracker (similar to pure pursuit)
-        # queue of 1: always run MPPI from the newest pose, never a stale one
+        self.U = jnp.zeros((self.config.H, self.config.NU))
+        self.U_std = jnp.broadcast_to(
+            jnp.array(self.config.U_STD), (self.config.H, self.config.NU))
+        self.key = jax.random.PRNGKey(0)
+        self.last_stamp = None
+        self.last_x0 = None
+
+        odom_topic = self.get_parameter('odom_topic').value
+        assert odom_topic != ''
         self.odom_subscriber = self.create_subscription(
-            Odometry,
-            '/ego_racecar/odom',
-            self.odom_callback,
-            1
+            Odometry, odom_topic, self.odom_callback, 1
         )
         self.drive_publisher = self.create_publisher(
-            AckermannDriveStamped,
-            '/drive',
-            10
+            AckermannDriveStamped, '/drive', 10
         )
+        self.scan_subscriber = self.create_subscription(
+            LaserScan, '/scan', self.scan_callback, 1,
+        )
+        self.control_timer = self.create_timer(
+            self.config.DT, self.control_callback,
+        )
+        self._last_control_time = None
+        self._latest_odom = None
+        self._odom_child_frame = ''
+        self._latest_scan = None
+        self.tf_buffer = Buffer()
+        self.tf_listener = TransformListener(self.tf_buffer, self)
+        self._last_visualization_time = 0.0
+
+        # Initialize grid configuration and precomputations
+        self.grid_cfg = og.GridConfig(
+            width=3.0,
+            height=7.0,
+            middle=(1.5, 1.0),
+            resolution=0.05,
+            inflation_radius=0.15,
+            num_beams=819,
+            distance_cap=0.25,
+        )
+        self.grid_precomps = None
+        self._grid_frames = None
+
+        rows_n, cols_n = self.grid_cfg.shape
+        cells = jnp.full((rows_n, cols_n), og.UNKNOWN, dtype=jnp.uint8)
+        free_dist = jnp.full((rows_n, cols_n), 1.0, dtype=jnp.float32)
+        self.grid_state = og.GridState(cells=cells, free_distance=free_dist)
 
         # TODO: load the waypoints of `track` from the package's installed waypoints/ folder:
         #       os.path.join(get_package_share_directory('mppi'), 'waypoints', <your csv>)
@@ -345,136 +382,199 @@ class MPPI(Node):
             'waypoints',
             track + '.csv'
         )
-        # columns x, y, yaw, v
         self.waypoints = np.loadtxt(
-            waypoint_path,
-            delimiter=',',
-            skiprows=1
+            waypoint_path, delimiter=',', skiprows=1
         )
-
-        # per-track overrides of MPPIConfig from the launch file, e.g. 'max_speed': 6.0
-        overrides = {}
-        for field in ('MAX_SPEED', 'LAMBDA', 'INTEGRATOR', 'SAMPLING', 'COV_UPDATE'):
-            default = getattr(MPPIConfig, field)
-            self.declare_parameter(field.lower(), default)
-            overrides[field] = type(default)(self.get_parameter(field.lower()).value)
-        self.config = replace(MPPIConfig(), **overrides)
-        # the reference must not ask for more than the car is allowed to do
         self.waypoints[:, 3] = np.minimum(self.waypoints[:, 3], self.config.MAX_SPEED)
 
-        self.U = jnp.zeros((self.config.H, self.config.NU))  # mean control sequence
-        self.U_std = jnp.broadcast_to(  # sampling std of each step (covariance update)
-            jnp.array(self.config.U_STD), (self.config.H, self.config.NU))
-        self.key = jax.random.PRNGKey(0)
-        self.last_stamp = None  # stamp of the last odometry, for the warm start
-        self.last_x0 = None  # state at the last odometry
-
-        # debugging only: sampled rollouts and the plan in RViz, on /mppi/markers
-        self.declare_parameter('visualize', False)
+        self.declare_parameter('visualize', True)
         self.visualize = self.get_parameter('visualize').value
         if self.visualize:
             self.marker_publisher = self.create_publisher(MarkerArray, '/mppi/markers', 1)
 
-        # jax.jit compiles mppi_step the first time it is called, which takes a
-        # few seconds: call it once here so the car does not wait for it
-        mppi_step(self.key, self.U, np.zeros(self.config.NX),
-                  np.zeros((self.config.H + 1, self.config.NX)), self.config)
-        mppi_step_cov(self.key, self.U, self.U_std, np.zeros(self.config.NX),
-                      np.zeros((self.config.H + 1, self.config.NX)), self.config)
-        self.get_logger().info(f'MPPI ready on {track}: {self.config}')
+        self.get_logger().info(f'MPPI initialized on {track}; waiting for LiDAR extrinsics')
 
-    def odom_callback(self, odom_msg):
-        # TODO: extract the state x0 = [p_x, p_y, yaw, v] from the ROS msg
-        position = odom_msg.pose.pose.position
-        orientation = odom_msg.pose.pose.orientation
-        velocity = odom_msg.twist.twist.linear
+    def _warm_up(self):
+        """Compile only after the actual sensor geometry is available."""
+        dummy_ranges = jnp.zeros(self.grid_cfg.num_beams)
+        dummy_grid_state = og.update(
+            self.grid_cfg, self.grid_precomps, dummy_ranges)
+        mppi_step(self.key, self.U, np.zeros(self.config.NX),
+                  np.zeros((self.config.H + 1, self.config.NX)), self.config, self.grid_cfg, self.grid_precomps, dummy_grid_state)
+        mppi_step_cov(self.key, self.U, self.U_std, np.zeros(self.config.NX),
+                      np.zeros((self.config.H + 1, self.config.NX)), self.config, self.grid_cfg, self.grid_precomps, dummy_grid_state)
+        self.get_logger().info(f'MPPI ready: {self.config}')
+
+    def odom_callback(self, msg):
+        position = msg.pose.pose.position
+        q = msg.pose.pose.orientation
+        velocity = msg.twist.twist.linear
 
         yaw = np.arctan2(
-            2.0 * (orientation.w * orientation.z + orientation.x * orientation.y),
-            1.0 - 2.0 * (orientation.y ** 2 + orientation.z ** 2)
+            2.0 * (q.w * q.z + q.x * q.y),
+            1.0 - 2.0 * (q.y * q.y + q.z * q.z),
+        )
+        speed = np.hypot(velocity.x, velocity.y)
+
+        state = np.array(
+            [position.x, position.y, yaw, speed],
+            dtype=np.float64,
+        )
+        self._latest_odom = state
+        self._odom_child_frame = msg.child_frame_id
+
+    def scan_callback(self, msg):
+        ranges = np.asarray(msg.ranges, dtype=np.float32).copy()
+        self._latest_scan = (
+            ranges,
+            float(msg.angle_min),
+            float(msg.angle_increment),
+            float(msg.range_min),
+            float(msg.range_max),
+            msg.header.frame_id,
+            msg.header.stamp,
         )
 
-        speed = np.sqrt(velocity.x ** 2 + velocity.y ** 2)
+    def _lookup_lidar_pose(self, scan_frame, scan_stamp):
+        """Return fixed car <- LiDAR [forward, left, yaw], or None if unavailable."""
+        if not self._odom_child_frame or not scan_frame:
+            self.get_logger().warning('Missing odometry child or scan frame; stopping',
+                                      throttle_duration_sec=1.0)
+            return None
+        try:
+            transform = self.tf_buffer.lookup_transform(
+                self._odom_child_frame, scan_frame, Time.from_msg(scan_stamp))
+        except TransformException as exc:
+            self.get_logger().warning(f'LiDAR extrinsics unavailable; stopping: {exc}',
+                                      throttle_duration_sec=1.0)
+            return None
+        t = transform.transform.translation
+        q = transform.transform.rotation
+        yaw = np.arctan2(
+            2.0 * (q.w * q.z + q.x * q.y),
+            1.0 - 2.0 * (q.y * q.y + q.z * q.z),
+        )
+        return (t.x, t.y, yaw)
 
-        x0 = np.array([
-            position.x,
-            position.y,
-            yaw,
-            speed
-        ])
+    def _ensure_grid_precomputations(self, scan_frame, scan_stamp):
+        """Cache rigid sensor geometry; resolve it again if either frame changes."""
+        frames = (self._odom_child_frame, scan_frame)
+        if self._grid_frames == frames:
+            return True
+        lidar_pose = self._lookup_lidar_pose(scan_frame, scan_stamp)
+        if lidar_pose is None:
+            return False
+        # Do not leave a previous drive command active during JAX compilation.
+        self._publish_stop(self.get_clock().now())
+        self.grid_precomps = og.GridPrecomputations(self.grid_cfg, lidar_pose)
+        self._warm_up()
+        self._grid_frames = frames
+        return True
 
-        # TODO: Calculate the reference trajectory for the next H steps
-        #       with the current vehicle state.
-        #       ref_x, ref_y, ref_yaw, ref_v are columns of self.waypoints
+    def control_callback(self):
+        odom = self._latest_odom
+        scan = self._latest_scan
+
+        if odom is None:
+            return
+
+        now = self.get_clock().now()
+        now_sec = now.nanoseconds * 1e-9
+        x0 = odom
+
+        if scan is None:
+            self.get_logger().warning(
+                'No scan received yet; publishing stop command',
+                throttle_duration_sec=1.0,
+            )
+            self._publish_stop(now)
+            return
+
+        ranges, angle_min, angle_increment, range_min, range_max, scan_frame, scan_stamp = scan
+
+        if not self._ensure_grid_precomputations(scan_frame, scan_stamp):
+            self._publish_stop(now)
+            return
+
+        grid_state = og.update(self.grid_cfg, self.grid_precomps, jnp.array(ranges))
+        self.grid_state = grid_state
+
+        d = np.diff(self.waypoints[:, :2], axis=0)
+        yaw = np.arctan2(d[:, 1], d[:, 0])
+        yaw = np.append(yaw, yaw[-1])
         ref = self.calc_ref_trajectory(
             x0,
             self.waypoints[:, 0],
             self.waypoints[:, 1],
-            self.waypoints[:, 2],
-            self.waypoints[:, 3]
+            yaw,
+            self.waypoints[:, 3],
         )
 
-        # TODO: warm start: the first input of self.U was applied at the last
-        #       step, so shift self.U one step forward (drop the first input
-        #       and repeat the last one)
-        #       Odometry comes much faster than DT (250 Hz in the simulator), so
-        #       shift by the time since the last callback instead of a whole step
-        stamp = odom_msg.header.stamp.sec + 1e-9 * odom_msg.header.stamp.nanosec
-        elapsed = self.config.DT if self.last_stamp is None else stamp - self.last_stamp
+        elapsed = (
+            self.config.DT
+            if self._last_control_time is None
+            else now_sec - self._last_control_time
+        )
+        self._last_control_time = now_sec
         elapsed = float(np.clip(elapsed, 0.0, self.config.DT))
-        self.last_stamp = stamp
-        if self.last_x0 is not None and np.hypot(*(x0[:2] - self.last_x0[:2])) > 1.0:
-            # the car jumped (new start pose): the old plan is meaningless here
+
+        if (
+            self.last_x0 is not None
+            and np.hypot(*(x0[:2] - self.last_x0[:2])) > 1.0
+        ):
             self.U = jnp.zeros((self.config.H, self.config.NU))
             self.U_std = jnp.broadcast_to(
-                jnp.array(self.config.U_STD), (self.config.H, self.config.NU))
-        self.last_x0 = x0
+                jnp.array(self.config.U_STD),
+                (self.config.H, self.config.NU),
+            )
+
+        self.last_x0 = x0.copy()
         self.U = self.shift(self.U, elapsed, np.asarray(self.U[-1]))
 
         if self.config.COV_UPDATE:
-            # shift the std like U; the new last step starts from the prior std
-            self.U_std = self.shift(self.U_std, elapsed, np.array(self.config.U_STD))
+            self.U_std = self.shift(
+                self.U_std,
+                elapsed,
+                np.array(self.config.U_STD),
+            )
 
-        # a new random key at every step, so MPPI draws new samples
         self.key, subkey = jax.random.split(self.key)
-        # TODO: run MPPI, keep the new mean control sequence in self.U
+
         if self.config.COV_UPDATE:
             self.U, self.U_std, X_samples, weights = mppi_step_cov(
-                subkey,
-                self.U,
-                self.U_std,
-                x0,
-                ref,
-                self.config
+                subkey, self.U, self.U_std, x0, ref, self.config, self.grid_cfg, self.grid_precomps, self.grid_state
             )
         else:
             self.U, X_samples, weights = mppi_step(
-                subkey,
-                self.U,
-                x0,
-                ref,
-                self.config
+                subkey, self.U, x0, ref, self.config, self.grid_cfg, self.grid_precomps, self.grid_state
             )
 
         # TODO: publish drive message: steering delta_0, speed v + a_0 * DT
         #       (float() turns a JAX array into a number)
         drive_msg = AckermannDriveStamped()
+        drive_msg.header.stamp = now.to_msg()
         drive_msg.drive.steering_angle = float(self.U[0, 1])
 
         target_speed = x0[3] + float(self.U[0, 0]) * self.config.DT
         target_speed = np.clip(
             target_speed,
             self.config.MIN_SPEED,
-            self.config.MAX_SPEED
+            self.config.MAX_SPEED,
         )
 
         drive_msg.drive.speed = float(target_speed)
         self.drive_publisher.publish(drive_msg)
 
-        # TODO (optional, debugging only): visualize the reference, the trajectory
-        #       of self.U and a few sampled trajectories, colored by their weight
-        if self.visualize:
+        if self.visualize and now_sec - self._last_visualization_time >= 0.2:
+            self._last_visualization_time = now_sec
             self.publish_markers(x0, ref, X_samples, weights)
+
+    def _publish_stop(self, stamp):
+        msg = AckermannDriveStamped()
+        msg.header.stamp = stamp.to_msg()
+        msg.drive.speed = 0.0
+        msg.drive.steering_angle = 0.0
+        self.drive_publisher.publish(msg)
 
     def publish_markers(self, x0, ref, X_samples, weights, n_samples=50):
         """
@@ -550,7 +650,7 @@ def main(args=None):
     try:
         rclpy.spin(mppi_node)
     except (KeyboardInterrupt, ExternalShutdownException):
-        pass  # Ctrl-C: stop quietly
+        pass
     finally:
         mppi_node.destroy_node()
         rclpy.try_shutdown()
