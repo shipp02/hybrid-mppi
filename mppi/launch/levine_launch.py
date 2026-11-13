@@ -17,6 +17,7 @@ EXECUTABLE = 'mppi_node.py'
 # it a full .yaml config file
 PARAMETERS = {
     'track': 'levine',
+    'use_cpu': True,
     'odom_topic' : '/ego_racecar/odom',
     'visualize' : False
 }

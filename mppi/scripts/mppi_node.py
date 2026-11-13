@@ -405,11 +405,7 @@ class MPPI(Node):
     """
     def __init__(self):
         super().__init__('mppi_node')
-        # Fail rather than silently running the controller on CPU. Set the default
-        # before allocating state; ROS callbacks execute outside any device context.
-        self.device = jax.devices('cpu')[0]
-        jax.config.update('jax_default_device', self.device)
-        self.get_logger().info(f'JAX controller device: {self.device}')
+        self._configure_device()
         # launch/levine_launch.py sets track:=levine, launch/spielberg_launch.py track:=spielberg
         self.declare_parameter('track', 'levine')
         self.declare_parameter('odom_topic', '')
@@ -496,6 +492,23 @@ class MPPI(Node):
             self.marker_publisher = self.create_publisher(MarkerArray, '/mppi/markers', 1)
 
         self.get_logger().info(f'MPPI initialized on {track}; waiting for LiDAR extrinsics')
+
+    def _configure_device(self):
+        """Select backend before allocating state; GPU requests never fall back."""
+        self.declare_parameter('use_cpu', False)
+        backend = 'cpu' if self.get_parameter('use_cpu').value else 'gpu'
+        try:
+            devices = jax.devices(backend)
+        except RuntimeError as exc:
+            raise RuntimeError(
+                f'JAX {backend} backend unavailable. For CPU simulation, set '
+                'ROS parameter use_cpu:=true.') from exc
+        if not devices:
+            raise RuntimeError(f'No JAX {backend} devices available')
+        self.device = devices[0]
+        # ROS callbacks run outside device contexts, so set the process default.
+        jax.config.update('jax_default_device', self.device)
+        self.get_logger().info(f'JAX controller device: {self.device}')
 
     def _warm_up(self):
         """Compile only after the actual sensor geometry is available."""

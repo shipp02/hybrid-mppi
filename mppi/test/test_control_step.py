@@ -141,5 +141,76 @@ class ControlStepTest(unittest.TestCase):
         self.assertIs(node.control_state, self.state)
 
 
+class DeviceSelectionTest(unittest.TestCase):
+    def make_node(self, use_cpu):
+        node = object.__new__(controller.MPPI)
+        node.declare_parameter = Mock()
+        node.get_parameter = Mock(return_value=types.SimpleNamespace(value=use_cpu))
+        node.get_logger = Mock()
+        return node
+
+    def test_explicit_backend_selection(self):
+        for use_cpu, backend in ((True, 'cpu'), (False, 'gpu')):
+            with self.subTest(use_cpu=use_cpu):
+                node = self.make_node(use_cpu)
+                device = object()
+                with patch.object(jax, 'devices', return_value=[device]) as devices, \
+                        patch.object(jax.config, 'update') as update:
+                    node._configure_device()
+                node.declare_parameter.assert_called_once_with('use_cpu', False)
+                devices.assert_called_once_with(backend)
+                update.assert_called_once_with('jax_default_device', device)
+                self.assertIs(node.device, device)
+
+    def test_gpu_unavailable_does_not_fall_back(self):
+        node = self.make_node(False)
+        with patch.object(jax, 'devices', side_effect=RuntimeError('no GPU')) as devices:
+            with self.assertRaisesRegex(RuntimeError, 'use_cpu:=true'):
+                node._configure_device()
+        devices.assert_called_once_with('gpu')
+
+    def test_empty_backend_fails(self):
+        node = self.make_node(False)
+        with patch.object(jax, 'devices', return_value=[]):
+            with self.assertRaisesRegex(RuntimeError, 'No JAX gpu devices'):
+                node._configure_device()
+
+
+class LaunchDeviceTest(unittest.TestCase):
+    def load_launch(self, name):
+        launch = types.ModuleType('launch')
+        launch.LaunchDescription = list
+        actions = types.ModuleType('launch.actions')
+        actions.DeclareLaunchArgument = lambda name, **kwargs: (name, kwargs)
+        substitutions = types.ModuleType('launch.substitutions')
+        substitutions.LaunchConfiguration = lambda name: ('configuration', name)
+        ros = types.ModuleType('launch_ros.actions')
+        ros.Node = lambda **kwargs: types.SimpleNamespace(**kwargs)
+        namespace = {}
+        path = SCRIPTS.parent / 'launch' / name
+        with patch.dict(sys.modules, {
+                'launch': launch, 'launch.actions': actions,
+                'launch.substitutions': substitutions,
+                'launch_ros': types.ModuleType('launch_ros'),
+                'launch_ros.actions': ros}):
+            exec(compile(path.read_text(), str(path), 'exec'), namespace)
+            return namespace['generate_launch_description']()
+
+    def test_simulation_launches_use_cpu(self):
+        for name in ('levine_launch.py', 'spielberg_launch.py'):
+            node, = self.load_launch(name)
+            self.assertIs(node.parameters[0]['use_cpu'], True)
+            self.assertEqual(node.parameters[0]['odom_topic'], '/ego_racecar/odom')
+
+    def test_car_requires_gpu_and_explicit_odometry(self):
+        odom, track, node = self.load_launch('car_launch.py')
+        self.assertEqual(odom[0], 'odom_topic')
+        self.assertNotIn('default_value', odom[1])
+        self.assertEqual(track[1]['default_value'], 'levine')
+        self.assertIs(node.parameters[0]['use_cpu'], False)
+        self.assertEqual(node.parameters[0]['odom_topic'],
+                         ('configuration', 'odom_topic'))
+
+
 if __name__ == '__main__':
     unittest.main()
