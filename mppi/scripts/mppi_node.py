@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from dataclasses import dataclass, replace
 from functools import partial
+from typing import NamedTuple
 import time
 
 import jax
@@ -311,6 +312,92 @@ def mppi_step_cov(key, U, U_std, x0, ref, cfg, grid):
     return mppi_update(key, U, U_std, x0, ref, cfg, grid)
 
 
+class ControllerState(NamedTuple):
+    key: jax.Array
+    U: jax.Array
+    U_std: jax.Array
+
+
+class ControlObservation(NamedTuple):
+    x0: jax.Array
+    ranges: jax.Array
+    elapsed: jax.Array
+    reset: jax.Array
+
+
+class OptimizationResult(NamedTuple):
+    state: ControllerState
+    samples: jax.Array
+    weights: jax.Array
+
+
+class Visualization(NamedTuple):
+    reference: jax.Array
+    samples: jax.Array
+    weights: jax.Array
+    plan: jax.Array
+
+
+class ControlResult(NamedTuple):
+    state: ControllerState
+    grid: og.OccupancyGrid
+    action: jax.Array
+    visualization: Visualization | None
+
+
+def prepare_warm_start(state, observation, cfg):
+    """Reset after a pose jump, then advance the previous horizon in time."""
+    initial_std = jnp.broadcast_to(
+        jnp.array(cfg.U_STD, dtype=state.U_std.dtype), state.U_std.shape)
+    U = jnp.where(observation.reset, jnp.zeros_like(state.U), state.U)
+    U = shift_sequence(U, observation.elapsed, U[-1], cfg.DT)
+    if cfg.COV_UPDATE:
+        U_std = jnp.where(observation.reset, initial_std, state.U_std)
+        U_std = shift_sequence(U_std, observation.elapsed, initial_std[0], cfg.DT)
+    else:
+        U_std = initial_std
+    return ControllerState(state.key, U, U_std)
+
+
+def build_reference(x0, course, cfg):
+    """Build a speed-ramped world-frame reference from the current pose."""
+    cx, cy, cyaw, cv = course.T
+    return calc_interpolated_ref_trajectory_gpu(
+        x0[0], x0[1], cx, cy, cyaw, cv, cfg.DT, cfg.H,
+        v0=x0[3], max_accel=cfg.MAX_ACCEL)
+
+
+def optimize_controls(state, x0, reference, grid, cfg):
+    """Own sampling RNG advancement and fixed/adaptive covariance policy."""
+    key, sample_key = jax.random.split(state.key)
+    U, updated_std, samples, weights = mppi_update(
+        sample_key, state.U, state.U_std, x0, reference, cfg, grid)
+    U_std = updated_std if cfg.COV_UPDATE else state.U_std
+    return OptimizationResult(ControllerState(key, U, U_std), samples, weights)
+
+
+def select_control_outputs(solution, x0, reference, grid, cfg, emit_viz):
+    """Select action and bounded debug payload before crossing to the host."""
+    visualization = None
+    if emit_viz:
+        visualization = Visualization(
+            reference, solution.samples[:50], solution.weights[:50, 0],
+            simulate(x0, solution.state.U, cfg))
+    return ControlResult(
+        solution.state, grid, solution.state.U[0], visualization)
+
+
+@partial(jax.jit, static_argnames=("cfg", "emit_viz"))
+def control_step(state, observation, course, grid, cfg, *, emit_viz=False):
+    """One compiled dispatch; helpers preserve domain responsibility boundaries."""
+    state = prepare_warm_start(state, observation, cfg)
+    grid = grid.from_scan(observation.ranges)
+    reference = build_reference(observation.x0, course, cfg)
+    solution = optimize_controls(state, observation.x0, reference, grid, cfg)
+    return select_control_outputs(
+        solution, observation.x0, reference, grid, cfg, emit_viz)
+
+
 class MPPI(Node):
     """
     Implement Kinematic MPPI on the car
@@ -335,10 +422,12 @@ class MPPI(Node):
             overrides[field] = type(default)(self.get_parameter(field.lower()).value)
         self.config = replace(MPPIConfig(), **overrides)
 
-        self.U = jnp.zeros((self.config.H, self.config.NU))
-        self.U_std = jnp.broadcast_to(
-            jnp.array(self.config.U_STD), (self.config.H, self.config.NU))
-        self.key = jax.random.PRNGKey(0)
+        self.control_state = ControllerState(
+            jax.random.PRNGKey(0),
+            jnp.zeros((self.config.H, self.config.NU)),
+            jnp.broadcast_to(
+                jnp.array(self.config.U_STD), (self.config.H, self.config.NU)),
+        )
         self.last_stamp = None
         self.last_x0 = None
 
@@ -410,20 +499,16 @@ class MPPI(Node):
 
     def _warm_up(self):
         """Compile only after the actual sensor geometry is available."""
-        dummy_ranges = jnp.zeros(self.grid.spec.num_beams)
-        dummy_grid = self.grid.from_scan(dummy_ranges)
-        x0 = jnp.zeros(self.config.NX, dtype=jnp.float32)
-        ref = self.calc_ref_trajectory(x0, *self.course.T)
-        elapsed = jnp.asarray(self.config.DT, dtype=jnp.float32)
-        U = self.shift(self.U, elapsed, self.U[-1])
-        U_std = self.shift(self.U_std, elapsed, jnp.array(self.config.U_STD))
-        key, _ = jax.random.split(self.key)
-        if self.config.COV_UPDATE:
-            result = mppi_step_cov(key, U, U_std, x0, ref, self.config,
-                                   dummy_grid)
-        else:
-            result = mppi_step(key, U, x0, ref, self.config, dummy_grid)
-        jax.block_until_ready(result)
+        observation = ControlObservation(
+            np.zeros(self.config.NX, dtype=np.float32),
+            np.zeros(self.grid.spec.num_beams, dtype=np.float32),
+            np.float32(self.config.DT), np.bool_(False),
+        )
+        for emit_viz in ((False, True) if self.visualize else (False,)):
+            result = control_step(
+                self.control_state, observation, self.course, self.grid,
+                self.config, emit_viz=emit_viz)
+            jax.block_until_ready(result)
         self.get_logger().info(f'MPPI ready: {self.config}')
 
     def odom_callback(self, msg):
@@ -498,13 +583,29 @@ class MPPI(Node):
         return True
 
     def control_callback(self):
+        now = self.get_clock().now()
+        observation = self._prepare_control_observation(now)
+        if observation is None:
+            return
+        control_start = time.perf_counter()
+        result = control_step(
+            self.control_state, observation, self.course, self.grid,
+            self.config, emit_viz=self._visualization_due(now))
+        self._publish_control_result(result, observation, now)
+        self._log_control_stats(control_start)
+
+    def _visualization_due(self, now):
+        return (self.visualize
+                and now.nanoseconds * 1e-9 - self._last_visualization_time >= 0.2)
+
+    def _prepare_control_observation(self, now):
+        """Validate sensors and compute host-side timing/reset policy."""
         odom = self._latest_odom
         scan = self._latest_scan
 
         if odom is None:
             return
 
-        now = self.get_clock().now()
         now_sec = now.nanoseconds * 1e-9
         x0 = odom
 
@@ -522,12 +623,6 @@ class MPPI(Node):
             self._publish_stop(now)
             return
 
-        control_start = time.perf_counter()
-        self.grid = self.grid.from_scan(jnp.array(ranges))
-
-        x0_device = jax.device_put(x0.astype(np.float32), self.device)
-        ref = self.calc_ref_trajectory(x0_device, *self.course.T)
-
         elapsed = (
             self.config.DT
             if self._last_control_time is None
@@ -536,43 +631,27 @@ class MPPI(Node):
         self._last_control_time = now_sec
         elapsed = float(np.clip(elapsed, 0.0, self.config.DT))
 
-        if (
+        reset = (
             self.last_x0 is not None
             and np.hypot(*(x0[:2] - self.last_x0[:2])) > 1.0
-        ):
-            self.U = jnp.zeros((self.config.H, self.config.NU))
-            self.U_std = jnp.broadcast_to(
-                jnp.array(self.config.U_STD),
-                (self.config.H, self.config.NU),
-            )
-
+        )
         self.last_x0 = x0.copy()
-        elapsed = jnp.asarray(elapsed, dtype=jnp.float32)
-        self.U = self.shift(self.U, elapsed, self.U[-1])
+        return ControlObservation(
+            x0.astype(np.float32), ranges, np.float32(elapsed), np.bool_(reset))
 
-        if self.config.COV_UPDATE:
-            self.U_std = self.shift(
-                self.U_std,
-                elapsed,
-                jnp.array(self.config.U_STD),
-            )
+    def _publish_control_result(self, result, observation, now):
+        """Keep persistent arrays resident; read back only publication outputs."""
+        self.control_state = result.state
+        self.grid = result.grid
+        action, visualization = jax.device_get((result.action, result.visualization))
+        self._publish_drive(action, observation.x0, now)
+        if visualization is not None:
+            self._last_visualization_time = now.nanoseconds * 1e-9
+            self.publish_markers(visualization)
 
-        self.key, subkey = jax.random.split(self.key)
-
-        if self.config.COV_UPDATE:
-            self.U, self.U_std, X_samples, weights = mppi_step_cov(
-                subkey, self.U, self.U_std, x0_device, ref, self.config, self.grid
-            )
-        else:
-            self.U, X_samples, weights = mppi_step(
-                subkey, self.U, x0_device, ref, self.config, self.grid
-            )
-
-        # TODO: publish drive message: steering delta_0, speed v + a_0 * DT
-        #       (float() turns a JAX array into a number)
+    def _publish_drive(self, action, x0, now):
         drive_msg = AckermannDriveStamped()
         drive_msg.header.stamp = now.to_msg()
-        action = jax.device_get(self.U[0])
         drive_msg.drive.steering_angle = float(action[1])
 
         target_speed = x0[3] + float(action[0]) * self.config.DT
@@ -584,12 +663,6 @@ class MPPI(Node):
 
         drive_msg.drive.speed = float(target_speed)
         self.drive_publisher.publish(drive_msg)
-
-        if self.visualize and now_sec - self._last_visualization_time >= 0.2:
-            self._last_visualization_time = now_sec
-            self.publish_markers(x0, ref, X_samples, weights)
-
-        self._log_control_stats(control_start)
 
     def _log_control_stats(self, start):
         """Wall-clock hot-path timings, synchronized by the selected-action readback.
@@ -633,16 +706,10 @@ class MPPI(Node):
         msg.drive.steering_angle = 0.0
         self.drive_publisher.publish(msg)
 
-    def publish_markers(self, x0, ref, X_samples, weights, n_samples=50):
-        """
-        Debugging only: the reference (green), the plan of self.U (red) and
-        n_samples sampled rollouts, from white (low weight) to blue (high weight)
-        """
-        ref = np.asarray(ref)
-        X_samples = np.asarray(X_samples[:n_samples])
-        w = np.asarray(weights[:n_samples, 0])
+    def publish_markers(self, visualization):
+        """Publish host-only reference, optimized plan, and sampled rollouts."""
+        ref, X_samples, w, plan = visualization
         w = w / (w.max() + 1e-12)
-        plan = np.asarray(simulate(jnp.asarray(x0), self.U, self.config))
 
         def line(i, points, r, g, b, width):
             marker = Marker()
@@ -664,36 +731,6 @@ class MPPI(Node):
             markers.markers.append(
                 line(2 + k, X_samples[k], 1.0 - w[k], 1.0 - w[k], 1.0, 0.01))
         self.marker_publisher.publish(markers)
-
-    def shift(self, seq, elapsed, fill):
-        """
-        Warm start: seq[k] is planned for time k * DT, so after `elapsed` seconds
-        the new seq[k] is the old one at k * DT + elapsed, linearly interpolated.
-        With elapsed = DT, this drops the first step and appends `fill`.
-        :param seq: sequence over the horizon, shape (H, NU)
-        :param fill: value after the end of the horizon, shape (NU,)
-        """
-        return shift_sequence(seq, elapsed, fill, self.config.DT)
-
-    def calc_ref_trajectory(self, x0, cx, cy, cyaw, cv):
-        """
-        Calculate interpolated reference trajectory for H steps: [x, y, yaw, v]
-
-        :param x0: current state [p_x, p_y, yaw, v]
-        :param cx: Course X-Position
-        :param cy: Course y-Position
-        :param cyaw: Course Heading
-        :param cv: speed profile
-        :return: reference trajectory ref (H+1 x NX)
-        """
-        return calc_interpolated_ref_trajectory_gpu(
-            x0[0], x0[1],
-            cx, cy, cyaw, cv,
-            self.config.DT,
-            self.config.H,
-            v0=x0[3],
-            max_accel=self.config.MAX_ACCEL
-        )
 
 
 def main(args=None):
