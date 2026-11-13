@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 from dataclasses import dataclass, replace
 from functools import partial
-import functools
+import time
 
 import jax
 import jax.numpy as jnp
@@ -10,7 +10,7 @@ import rclpy
 from ackermann_msgs.msg import AckermannDriveStamped
 from rclpy.node import Node
 from rclpy.executors import ExternalShutdownException
-from utils import calc_interpolated_ref_trajectory
+from utils import calc_interpolated_ref_trajectory_gpu, shift_sequence
 import occupancy_grid as og
 
 import os
@@ -28,10 +28,10 @@ class MPPIConfig:
     NX: int = 4  # length of state vector: x = [p_x, p_y, yaw, v]
     NU: int = 2  # length of input vector: u = [a, delta]
     T: int = 1024  # number of sampled control sequences
-    H: int = 20  # horizon length
+    H: int = 40  # horizon length
     DT: float = 0.05  # time step [s]
     INTEGRATOR: str = "rk4"  # "euler" or "rk4" (bonus)
-    SAMPLING: str = "truncated"  # "clip", or bonus: "truncated" (normal) or "uniform"
+    SAMPLING: str = "uniform"  # "clip", or bonus: "truncated" (normal) or "uniform"
     COV_UPDATE: bool = True  # bonus: adapt the sampling std of each step
 
     # ---------------------------------------------------
@@ -166,7 +166,7 @@ def trajectory_to_car_frame(ref_traj, x, y, yaw):
     )
 
 
-def cost(X, U, ref, cfg, grid_cfg, grid_precomps, grid_state):
+def cost(X, U, ref, cfg, grid):
     error = X[1:] - ref[1:]
 
     yaw_error = jnp.arctan2(
@@ -179,14 +179,17 @@ def cost(X, U, ref, cfg, grid_cfg, grid_precomps, grid_state):
     # Map rollout trajectory into local car frame for collision/distance evaluation
     local_traj = trajectory_to_car_frame(X[1:], X[0, 0], X[0, 1], X[0, 2])
     
-    # Evaluate obstacle proximity using the precomputed JAX occupancy grid functions
-    obs_blocked = og.is_free_poses(grid_cfg, grid_state, local_traj)
-    obs_dist = og.find_distances(grid_cfg, grid_state, local_traj)
-    
-    # Example penalty weights for obstacles and collisions
-    # obs_cost = jnp.sum(jnp.where(obs_dist < grid_cfg.inflation_radius, 1e1, 0.0))
+    # Evaluate obstacle proximity using the immutable JAX occupancy grid
+    obs_blocked = grid.is_free(local_traj)
+    obs_dist = grid.clearance(local_traj)
+
     obs_cost = 0.0
-    obs_block_cost = jnp.sum(jnp.where(~obs_blocked, 1e1, 0.0))
+    # Arc length from the car to each rollout point, including the first segment.
+    local_xy = jnp.concatenate((jnp.zeros((1, 2)), local_traj[:, :2]), axis=0)
+    path_dist = jnp.cumsum(jnp.linalg.norm(jnp.diff(local_xy, axis=0), axis=1))
+    # Distance in meters: 10 at the car, 5 at 1 m, decreasing farther ahead.
+    blocked_penalty = 1e1 / (1.0 + path_dist)
+    obs_block_cost = jnp.sum(jnp.where(~obs_blocked, blocked_penalty, 0.0))
 
     # position error in the frame of the reference: [lag, lateral]. From rest the
     # reference runs ahead of the car, and a plain x/y error is then all lag,
@@ -262,14 +265,14 @@ def sample_controls(key, U, U_std, cfg):
     return jnp.clip(U + z * U_std, lower, upper)
 
 
-def mppi_update(key, U, U_std, x0, ref, cfg, grid_cfg, grid_precomps, grid_state):
+def mppi_update(key, U, U_std, x0, ref, cfg, grid):
     U_samples = sample_controls(key, U, U_std, cfg)
 
     # 2. Simulate: roll out all T sequences from x0
     X_samples = rollout(x0, U_samples, cfg)
 
-    C = jax.vmap(cost, in_axes=(0, 0, None, None, None, None, None))(
-        X_samples, U_samples, ref, cfg, grid_cfg, grid_precomps, grid_state
+    C = jax.vmap(cost, in_axes=(0, 0, None, None, None))(
+        X_samples, U_samples, ref, cfg, grid
     )
     S = jnp.flip(jnp.cumsum(jnp.flip(C, axis=1), axis=1), axis=1)
 
@@ -296,16 +299,16 @@ def mppi_update(key, U, U_std, x0, ref, cfg, grid_cfg, grid_precomps, grid_state
     return U_new, U_std_new, X_samples, weights
 
 
-@partial(jax.jit, static_argnames=("cfg", "grid_cfg", "grid_precomps"))
-def mppi_step(key, U, x0, ref, cfg, grid_cfg, grid_precomps, grid_state):
+@partial(jax.jit, static_argnames=("cfg",))
+def mppi_step(key, U, x0, ref, cfg, grid):
     U_std = jnp.broadcast_to(jnp.array(cfg.U_STD), (cfg.H, cfg.NU))
-    U_new, _, X_samples, weights = mppi_update(key, U, U_std, x0, ref, cfg, grid_cfg, grid_precomps, grid_state)
+    U_new, _, X_samples, weights = mppi_update(key, U, U_std, x0, ref, cfg, grid)
     return U_new, X_samples, weights
 
 
-@partial(jax.jit, static_argnames=("cfg", "grid_cfg", "grid_precomps"))
-def mppi_step_cov(key, U, U_std, x0, ref, cfg, grid_cfg, grid_precomps, grid_state):
-    return mppi_update(key, U, U_std, x0, ref, cfg, grid_cfg, grid_precomps, grid_state)
+@partial(jax.jit, static_argnames=("cfg",))
+def mppi_step_cov(key, U, U_std, x0, ref, cfg, grid):
+    return mppi_update(key, U, U_std, x0, ref, cfg, grid)
 
 
 class MPPI(Node):
@@ -315,6 +318,11 @@ class MPPI(Node):
     """
     def __init__(self):
         super().__init__('mppi_node')
+        # Fail rather than silently running the controller on CPU. Set the default
+        # before allocating state; ROS callbacks execute outside any device context.
+        self.device = jax.devices('cpu')[0]
+        jax.config.update('jax_default_device', self.device)
+        self.get_logger().info(f'JAX controller device: {self.device}')
         # launch/levine_launch.py sets track:=levine, launch/spielberg_launch.py track:=spielberg
         self.declare_parameter('track', 'levine')
         self.declare_parameter('odom_topic', '')
@@ -355,9 +363,13 @@ class MPPI(Node):
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
         self._last_visualization_time = 0.0
+        self._control_latencies = []
+        self._control_periods = []
+        self._last_control_start = None
+        self._stats_window_start = None
 
-        # Initialize grid configuration and precomputations
-        self.grid_cfg = og.GridConfig(
+        # Geometry is initialized after the fixed LiDAR pose becomes available.
+        self._grid_settings = dict(
             width=3.0,
             height=7.0,
             middle=(1.5, 1.0),
@@ -366,13 +378,8 @@ class MPPI(Node):
             num_beams=819,
             distance_cap=0.25,
         )
-        self.grid_precomps = None
+        self.grid = None
         self._grid_frames = None
-
-        rows_n, cols_n = self.grid_cfg.shape
-        cells = jnp.full((rows_n, cols_n), og.UNKNOWN, dtype=jnp.uint8)
-        free_dist = jnp.full((rows_n, cols_n), 1.0, dtype=jnp.float32)
-        self.grid_state = og.GridState(cells=cells, free_distance=free_dist)
 
         # TODO: load the waypoints of `track` from the package's installed waypoints/ folder:
         #       os.path.join(get_package_share_directory('mppi'), 'waypoints', <your csv>)
@@ -386,6 +393,13 @@ class MPPI(Node):
             waypoint_path, delimiter=',', skiprows=1
         )
         self.waypoints[:, 3] = np.minimum(self.waypoints[:, 3], self.config.MAX_SPEED)
+        d = np.diff(self.waypoints[:, :2], axis=0)
+        yaw = np.arctan2(d[:, 1], d[:, 0])
+        yaw = np.append(yaw, yaw[-1])
+        # Fixed course geometry: compute once, upload once.
+        self.course = jax.device_put(np.column_stack((
+            self.waypoints[:, :2], yaw, self.waypoints[:, 3],
+        )).astype(np.float32), self.device)
 
         self.declare_parameter('visualize', True)
         self.visualize = self.get_parameter('visualize').value
@@ -396,13 +410,20 @@ class MPPI(Node):
 
     def _warm_up(self):
         """Compile only after the actual sensor geometry is available."""
-        dummy_ranges = jnp.zeros(self.grid_cfg.num_beams)
-        dummy_grid_state = og.update(
-            self.grid_cfg, self.grid_precomps, dummy_ranges)
-        mppi_step(self.key, self.U, np.zeros(self.config.NX),
-                  np.zeros((self.config.H + 1, self.config.NX)), self.config, self.grid_cfg, self.grid_precomps, dummy_grid_state)
-        mppi_step_cov(self.key, self.U, self.U_std, np.zeros(self.config.NX),
-                      np.zeros((self.config.H + 1, self.config.NX)), self.config, self.grid_cfg, self.grid_precomps, dummy_grid_state)
+        dummy_ranges = jnp.zeros(self.grid.spec.num_beams)
+        dummy_grid = self.grid.from_scan(dummy_ranges)
+        x0 = jnp.zeros(self.config.NX, dtype=jnp.float32)
+        ref = self.calc_ref_trajectory(x0, *self.course.T)
+        elapsed = jnp.asarray(self.config.DT, dtype=jnp.float32)
+        U = self.shift(self.U, elapsed, self.U[-1])
+        U_std = self.shift(self.U_std, elapsed, jnp.array(self.config.U_STD))
+        key, _ = jax.random.split(self.key)
+        if self.config.COV_UPDATE:
+            result = mppi_step_cov(key, U, U_std, x0, ref, self.config,
+                                   dummy_grid)
+        else:
+            result = mppi_step(key, U, x0, ref, self.config, dummy_grid)
+        jax.block_until_ready(result)
         self.get_logger().info(f'MPPI ready: {self.config}')
 
     def odom_callback(self, msg):
@@ -421,7 +442,7 @@ class MPPI(Node):
             dtype=np.float64,
         )
         self._latest_odom = state
-        self._odom_child_frame = msg.child_frame_id
+        self._odom_child_frame = msg.child_frame_id if msg.child_frame_id else 'odom'
 
     def scan_callback(self, msg):
         ranges = np.asarray(msg.ranges, dtype=np.float32).copy()
@@ -456,7 +477,7 @@ class MPPI(Node):
         )
         return (t.x, t.y, yaw)
 
-    def _ensure_grid_precomputations(self, scan_frame, scan_stamp):
+    def _ensure_grid(self, scan_frame, scan_stamp):
         """Cache rigid sensor geometry; resolve it again if either frame changes."""
         frames = (self._odom_child_frame, scan_frame)
         if self._grid_frames == frames:
@@ -466,8 +487,13 @@ class MPPI(Node):
             return False
         # Do not leave a previous drive command active during JAX compilation.
         self._publish_stop(self.get_clock().now())
-        self.grid_precomps = og.GridPrecomputations(self.grid_cfg, lidar_pose)
+        self.grid = og.OccupancyGrid.create(lidar_pose=lidar_pose, **self._grid_settings)
         self._warm_up()
+        # Compilation pauses are not steady-state control-loop measurements.
+        self._control_latencies.clear()
+        self._control_periods.clear()
+        self._last_control_start = None
+        self._stats_window_start = None
         self._grid_frames = frames
         return True
 
@@ -492,23 +518,15 @@ class MPPI(Node):
 
         ranges, angle_min, angle_increment, range_min, range_max, scan_frame, scan_stamp = scan
 
-        if not self._ensure_grid_precomputations(scan_frame, scan_stamp):
+        if not self._ensure_grid(scan_frame, scan_stamp):
             self._publish_stop(now)
             return
 
-        grid_state = og.update(self.grid_cfg, self.grid_precomps, jnp.array(ranges))
-        self.grid_state = grid_state
+        control_start = time.perf_counter()
+        self.grid = self.grid.from_scan(jnp.array(ranges))
 
-        d = np.diff(self.waypoints[:, :2], axis=0)
-        yaw = np.arctan2(d[:, 1], d[:, 0])
-        yaw = np.append(yaw, yaw[-1])
-        ref = self.calc_ref_trajectory(
-            x0,
-            self.waypoints[:, 0],
-            self.waypoints[:, 1],
-            yaw,
-            self.waypoints[:, 3],
-        )
+        x0_device = jax.device_put(x0.astype(np.float32), self.device)
+        ref = self.calc_ref_trajectory(x0_device, *self.course.T)
 
         elapsed = (
             self.config.DT
@@ -529,33 +547,35 @@ class MPPI(Node):
             )
 
         self.last_x0 = x0.copy()
-        self.U = self.shift(self.U, elapsed, np.asarray(self.U[-1]))
+        elapsed = jnp.asarray(elapsed, dtype=jnp.float32)
+        self.U = self.shift(self.U, elapsed, self.U[-1])
 
         if self.config.COV_UPDATE:
             self.U_std = self.shift(
                 self.U_std,
                 elapsed,
-                np.array(self.config.U_STD),
+                jnp.array(self.config.U_STD),
             )
 
         self.key, subkey = jax.random.split(self.key)
 
         if self.config.COV_UPDATE:
             self.U, self.U_std, X_samples, weights = mppi_step_cov(
-                subkey, self.U, self.U_std, x0, ref, self.config, self.grid_cfg, self.grid_precomps, self.grid_state
+                subkey, self.U, self.U_std, x0_device, ref, self.config, self.grid
             )
         else:
             self.U, X_samples, weights = mppi_step(
-                subkey, self.U, x0, ref, self.config, self.grid_cfg, self.grid_precomps, self.grid_state
+                subkey, self.U, x0_device, ref, self.config, self.grid
             )
 
         # TODO: publish drive message: steering delta_0, speed v + a_0 * DT
         #       (float() turns a JAX array into a number)
         drive_msg = AckermannDriveStamped()
         drive_msg.header.stamp = now.to_msg()
-        drive_msg.drive.steering_angle = float(self.U[0, 1])
+        action = jax.device_get(self.U[0])
+        drive_msg.drive.steering_angle = float(action[1])
 
-        target_speed = x0[3] + float(self.U[0, 0]) * self.config.DT
+        target_speed = x0[3] + float(action[0]) * self.config.DT
         target_speed = np.clip(
             target_speed,
             self.config.MIN_SPEED,
@@ -569,6 +589,43 @@ class MPPI(Node):
             self._last_visualization_time = now_sec
             self.publish_markers(x0, ref, X_samples, weights)
 
+        self._log_control_stats(control_start)
+
+    def _log_control_stats(self, start):
+        """Wall-clock hot-path timings, synchronized by the selected-action readback.
+
+        Includes ROS drive publication and optional visualization. Excludes input
+        checks, TF lookup, warmup, skipped ticks, and this summary's logging cost.
+        """
+        end = time.perf_counter()
+        self._control_latencies.append(end - start)
+        if self._last_control_start is not None:
+            self._control_periods.append(start - self._last_control_start)
+        self._last_control_start = start
+        if self._stats_window_start is None:
+            self._stats_window_start = start
+        if end - self._stats_window_start < 1.0:
+            return
+
+        latency_ms = np.asarray(self._control_latencies) * 1e3
+        period_ms = np.asarray(self._control_periods) * 1e3
+        overruns = np.count_nonzero(latency_ms > self.config.DT * 1e3)
+        period_stats = (
+            f'{period_ms.mean():.2f}/{np.percentile(period_ms, 95):.2f}/{period_ms.max():.2f}'
+            if period_ms.size else 'n/a'
+        )
+        self.get_logger().info(
+            f'Control loop: n={latency_ms.size}, '
+            f'latency ms mean/p95/max={latency_ms.mean():.2f}/'
+            f'{np.percentile(latency_ms, 95):.2f}/{latency_ms.max():.2f}, '
+            f'period ms mean/p95/max={period_stats}, '
+            f'latency > {self.config.DT * 1e3:.1f} ms: {overruns}/{latency_ms.size}, '
+            f'visualize={self.visualize}'
+        )
+        self._control_latencies.clear()
+        self._control_periods.clear()
+        self._stats_window_start = end
+
     def _publish_stop(self, stamp):
         msg = AckermannDriveStamped()
         msg.header.stamp = stamp.to_msg()
@@ -581,6 +638,7 @@ class MPPI(Node):
         Debugging only: the reference (green), the plan of self.U (red) and
         n_samples sampled rollouts, from white (low weight) to blue (high weight)
         """
+        ref = np.asarray(ref)
         X_samples = np.asarray(X_samples[:n_samples])
         w = np.asarray(weights[:n_samples, 0])
         w = w / (w.max() + 1e-12)
@@ -615,12 +673,7 @@ class MPPI(Node):
         :param seq: sequence over the horizon, shape (H, NU)
         :param fill: value after the end of the horizon, shape (NU,)
         """
-        seq = np.asarray(seq)
-        grid = np.arange(self.config.H) * self.config.DT
-        return jnp.array(np.column_stack([
-            np.interp(grid + elapsed, grid, seq[:, j], right=fill[j])
-            for j in range(seq.shape[1])
-        ]))
+        return shift_sequence(seq, elapsed, fill, self.config.DT)
 
     def calc_ref_trajectory(self, x0, cx, cy, cyaw, cv):
         """
@@ -633,7 +686,7 @@ class MPPI(Node):
         :param cv: speed profile
         :return: reference trajectory ref (H+1 x NX)
         """
-        return calc_interpolated_ref_trajectory(
+        return calc_interpolated_ref_trajectory_gpu(
             x0[0], x0[1],
             cx, cy, cyaw, cv,
             self.config.DT,

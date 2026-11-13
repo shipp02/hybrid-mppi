@@ -191,7 +191,21 @@ The skeleton is in `mppi/scripts/mppi_node.py`. You can find missing parts in th
 3. **MPPI update.** Fill in `mppi_step()` with steps 1 to 5 of Section IV.
 4. **Callback.** Create your subscribers and publishers and load your waypoints in `__init__()`, then fill in `odom_callback()`: read the vehicle state, compute the reference for the next $H$ steps, warm start $U$, run `mppi_step()` and publish the first input as an `AckermannDriveStamped`, with speed $v + a_0\,dt$ and steering $\delta_0$.
 
-**Dependencies.** The skeleton only needs JAX (`pip install jax`); there is no solver to install.
+**Dependencies.** The controller requires GPU-enabled JAX and fails at startup if no GPU backend is available; there is no solver to install. Install the CUDA/JAX build appropriate for your platform (Jetson requires a compatible JetPack build), then check using the same Python environment as the ROS node:
+
+```bash
+python3 -c "import jax; print(jax.devices('gpu'))"
+```
+
+Grid construction, reference generation, warm-start interpolation, sampling, rollouts, costs, and covariance updates run on GPU. Waypoints and planner state stay device-resident. ROS parsing, TF, timing, and drive publication remain on CPU; each tick reads back one acceleration/steering pair. Visualization retains its existing default and downloads debug trajectories; set ROS parameter `visualize:=false` for action-only readback.
+
+**Control-loop statistics.** `get_logger().info` reports completed-tick count, wall-clock latency and tick-period mean/p95/max (ms), and latency overruns against `DT`, approximately every second while control is active. Latency includes observation upload, GPU work, synchronized action readback, drive publication, and enabled visualization. Input checks, TF lookup, startup/reconfiguration compilation, skipped/stopped ticks, and summary logging itself are excluded. Periods measure time between timed tick starts, so include executor delays and intervening pauses. These are host-facing control-loop timings, not CUDA kernel timings or hard-real-time guarantees.
+
+Parity/residency tests (CPU-compatible; run with `JAX_PLATFORMS=cuda` on the target to verify GPU placement):
+
+```bash
+python3 -m unittest discover -s mppi/test -v
+```
 
 ## VII. Visualization
 

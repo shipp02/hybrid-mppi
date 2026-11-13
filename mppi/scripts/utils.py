@@ -25,7 +25,65 @@ Utility functions for the Kinematic MPPI waypoint tracker
 
 Author: Hongrui Zheng, Johannes Betz, Ahmad Amine
 """
+from functools import partial
+
+import jax
+import jax.numpy as jnp
 import numpy as np
+
+
+@partial(jax.jit, static_argnames=('dt',))
+def shift_sequence(seq, elapsed, fill, dt):
+    """Device-resident equivalent of the NumPy warm-start interpolation."""
+    grid = jnp.arange(seq.shape[0]) * dt
+    return jax.vmap(
+        lambda column, tail: jnp.interp(grid + elapsed, grid, column, right=tail),
+        in_axes=(1, 0), out_axes=1,
+    )(seq, fill)
+
+
+@partial(jax.jit, static_argnames=('dt', 'H'))
+def calc_interpolated_ref_trajectory_gpu(x, y, cx, cy, cyaw, cv, dt, H,
+                                        v0=None, max_accel=None):
+    """JAX counterpart of calc_interpolated_ref_trajectory; same segment/ramp rules."""
+    ncourse = cx.shape[0]
+    trajectory = jnp.stack((cx, cy), axis=1)
+    point = jnp.array([x, y])
+    diffs = trajectory[1:] - trajectory[:-1]
+    l2s = jnp.sum(diffs ** 2, axis=1)
+    t = jnp.clip(jnp.sum((point - trajectory[:-1]) * diffs, axis=1) / l2s, 0.0, 1.0)
+    projections = trajectory[:-1] + t[:, None] * diffs
+    ind_current = jnp.argmin(jnp.linalg.norm(point - projections, axis=1))
+    t_current = t[ind_current]
+    dl = jnp.sqrt((cx[1] - cx[0]) ** 2 + (cy[1] - cy[0]) ** 2)
+    speed = (1.0 - t_current) * cv[ind_current] + t_current * cv[(ind_current + 1) % ncourse]
+    if v0 is not None and max_accel is not None:
+        speed = jnp.minimum(speed, v0)
+    initial_speed = speed
+
+    def advance(carry, i):
+        progress, speed = carry
+        progress = progress + speed * dt / dl
+        fraction = progress % 1.0
+        segment = (progress.astype(jnp.int32) + ind_current) % ncourse
+        speed = (1.0 - fraction) * cv[segment] + fraction * cv[(segment + 1) % ncourse]
+        if v0 is not None and max_accel is not None:
+            speed = jnp.minimum(speed, v0 + max_accel * i * dt)
+        return (progress, speed), (progress, speed)
+
+    _, (progress, speeds) = jax.lax.scan(advance, (t_current, speed), jnp.arange(1, H + 1))
+    progress = jnp.concatenate((t_current[None], progress))
+    speeds = jnp.concatenate((initial_speed[None], speeds))
+    ind = (jnp.floor(progress).astype(jnp.int32) + ind_current) % ncourse
+    ind_next = (ind + 1) % ncourse
+    fraction = progress % 1.0
+    yaw_diff = jnp.arctan2(jnp.sin(cyaw[ind_next] - cyaw[ind]), jnp.cos(cyaw[ind_next] - cyaw[ind]))
+    return jnp.stack((
+        (1.0 - fraction) * cx[ind] + fraction * cx[ind_next],
+        (1.0 - fraction) * cy[ind] + fraction * cy[ind_next],
+        cyaw[ind] + fraction * yaw_diff,
+        speeds,
+    ), axis=1)
 
 
 def nearest_point(point, trajectory):
