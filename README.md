@@ -1,5 +1,8 @@
 # Lab 8: Model Predictive Path Integral Control
 
+Experimental direct slip-aware control: [dynamic MPPI setup and limitations](docs/dynamic-mppi.md).
+Kinematic mode remains the default.
+
 ## I. Learning Goals
 
 - Discretization: Forward Euler and Runge-Kutta 4

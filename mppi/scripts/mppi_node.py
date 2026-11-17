@@ -168,8 +168,7 @@ def cost(X, U, ref, cfg, grid):
     local_traj = trajectory_to_car_frame(X[1:], X[0, 0], X[0, 1], X[0, 2])
     
     # Evaluate collisions using the immutable JAX occupancy grid
-    obs_blocked = (db.footprint_is_free(local_traj, grid, cfg)
-                   if cfg.DYNAMICS == 'dynamic' else grid.is_free(local_traj))
+    obs_blocked = grid.is_free(local_traj)
     # Arc length from the car to each rollout point, including the first segment.
     local_xy = jnp.concatenate((jnp.zeros((1, 2)), local_traj[:, :2]), axis=0)
     path_dist = jnp.cumsum(jnp.linalg.norm(jnp.diff(local_xy, axis=0), axis=1))
@@ -255,18 +254,12 @@ def sample_controls(key, U, U_std, cfg):
     return jnp.clip(U + z * U_std, lower, upper)
 
 
-def trajectory_is_feasible(X, U, grid, cfg):
-    """Validate a dynamic nominal in the current LiDAR/body frame."""
-    local = trajectory_to_car_frame(X[1:], X[0, 0], X[0, 1], X[0, 2])
-    return db.trajectory_is_feasible(X, U, local, grid, cfg)
-
-
-def select_feasible_controls(U, samples, trajectories, costs, x0, grid, cfg):
+def select_feasible_controls(U, samples, trajectories, costs, x0, cfg):
     """Recheck weighted mean: nonlinear feasibility is not preserved by averaging."""
     nominal = simulate(x0, U, cfg)
-    mean_ok = trajectory_is_feasible(nominal, U, grid, cfg)
-    sample_ok = jax.vmap(trajectory_is_feasible, in_axes=(0, 0, None, None))(
-        trajectories, samples, grid, cfg)
+    mean_ok = db.trajectory_is_feasible(nominal, U, cfg)
+    sample_ok = jax.vmap(db.trajectory_is_feasible, in_axes=(0, 0, None))(
+        trajectories, samples, cfg)
     score = jnp.where(sample_ok, jnp.sum(costs, axis=1), jnp.inf)
     best = samples[jnp.argmin(score)]
     braking = db.project_controls(
@@ -308,7 +301,7 @@ def mppi_update(key, U, U_std, x0, ref, cfg, grid):
     if cfg.DYNAMICS == 'dynamic':
         # Per-timestep weights can break slew even when every sample obeys it.
         U_new = db.project_controls(U_new, x0, cfg)
-        U_new = select_feasible_controls(U_new, U_samples, X_samples, C, x0, grid, cfg)
+        U_new = select_feasible_controls(U_new, U_samples, X_samples, C, x0, cfg)
 
     # Bonus: covariance update, Sigma_t = sum_k w[k, t] (u_k[t] - U_t)(u_k[t] - U_t)^T.
     # The truncated sampler draws each input independently, so it keeps the
@@ -409,7 +402,7 @@ def select_control_outputs(solution, x0, reference, grid, cfg, emit_viz):
     if emit_viz or cfg.DYNAMICS == 'dynamic':
         nominal = simulate(x0, solution.state.U, cfg)
         if cfg.DYNAMICS == 'dynamic':
-            feasible = trajectory_is_feasible(nominal, solution.state.U, grid, cfg)
+            feasible = db.trajectory_is_feasible(nominal, solution.state.U, cfg)
         if emit_viz:
             visualization = Visualization(
                 reference, solution.samples[:50], solution.weights[:50, 0], nominal)
@@ -456,8 +449,7 @@ class MPPI(Node):
                       'FRONT_STIFFNESS', 'REAR_STIFFNESS', 'FRONT_DRIVE_FRACTION',
                       'SPEED_RESPONSE_TIME', 'MAX_STEER_RATE', 'DYNAMIC_SUBSTEPS',
                       'BLEND_LOW_SPEED', 'BLEND_HIGH_SPEED', 'LATERAL_RESPONSE_TIME',
-                      'MAX_SIDESLIP', 'MAX_YAW_RATE', 'ENVELOPE_WEIGHT',
-                      'BODY_FRONT', 'BODY_REAR', 'BODY_HALF_WIDTH', 'SENSOR_TIMEOUT'):
+                      'MAX_SIDESLIP', 'MAX_YAW_RATE', 'ENVELOPE_WEIGHT'):
             default = getattr(MPPIConfig, field)
             self.declare_parameter(field.lower(), default)
             overrides[field] = type(default)(self.get_parameter(field.lower()).value)
@@ -498,7 +490,6 @@ class MPPI(Node):
         )
         self._last_control_time = None
         self._latest_odom = None
-        self._latest_odom_stamp = None
         self._odom_child_frame = ''
         self._latest_scan = None
         self.tf_buffer = Buffer()
@@ -614,7 +605,6 @@ class MPPI(Node):
             self.get_logger().error(str(exc), throttle_duration_sec=1.0)
             self._publish_stop(self.get_clock().now())
             return
-        self._latest_odom_stamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
         self._odom_child_frame = msg.child_frame_id if msg.child_frame_id else 'odom'
 
     def scan_callback(self, msg):
@@ -733,12 +723,6 @@ class MPPI(Node):
             return
 
         ranges, angle_min, angle_increment, range_min, range_max, scan_frame, scan_stamp = scan
-        if not self._sensors_fresh(now_sec, scan_stamp):
-            self.get_logger().warning('Stale or future-dated dynamic state/scan; stopping',
-                                      throttle_duration_sec=1.0)
-            self._publish_stop(now)
-            return
-
         if not self._ensure_grid(scan_frame, scan_stamp):
             self._publish_stop(now)
             return
@@ -759,16 +743,6 @@ class MPPI(Node):
         return ControlObservation(
             x0.astype(np.float32), ranges, np.float32(elapsed), np.bool_(reset))
 
-    def _sensors_fresh(self, now_sec, scan_stamp):
-        """Reject stale dynamic feedback; message stamps must share controller clock."""
-        if self.config.DYNAMICS == 'kinematic':
-            return True
-        if self._latest_odom_stamp is None:
-            return False
-        scan_sec = scan_stamp.sec + scan_stamp.nanosec * 1e-9
-        return all(0. <= now_sec - stamp <= self.config.SENSOR_TIMEOUT
-                   for stamp in (self._latest_odom_stamp, scan_sec))
-
     def _observed_vehicle_state(self, odom):
         """Use latest published setpoints, not command state from an older odom tick."""
         if self.config.DYNAMICS == 'kinematic':
@@ -781,27 +755,15 @@ class MPPI(Node):
         self.grid = result.grid
         action, visualization, feasible = jax.device_get(
             (result.action, result.visualization, result.feasible))
-        if not self._control_result_is_publishable(feasible):
+        if not feasible:
+            self.get_logger().warning(
+                'No model-feasible MPPI trajectory; stopping', throttle_duration_sec=1.0)
             self._publish_stop(now)
             return
         self._publish_drive(action, observation.x0, now)
         if visualization is not None:
             self._last_visualization_time = now.nanoseconds * 1e-9
             self.publish_markers(visualization)
-
-    def _control_result_is_publishable(self, feasible):
-        """Reject failed plans and dynamic plans made stale by compilation/compute."""
-        if not feasible:
-            self.get_logger().warning(
-                'No model-feasible MPPI trajectory; stopping', throttle_duration_sec=1.0)
-            return False
-        if self.config.DYNAMICS == 'dynamic':
-            now_sec = self.get_clock().now().nanoseconds * 1e-9
-            if self._latest_scan is None or not self._sensors_fresh(now_sec, self._latest_scan[-1]):
-                self.get_logger().warning('Dynamic plan expired before publication; stopping',
-                                          throttle_duration_sec=1.0)
-                return False
-        return True
 
     def _publish_drive(self, action, x0, now):
         drive_msg = AckermannDriveStamped()

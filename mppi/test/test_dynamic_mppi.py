@@ -40,7 +40,7 @@ class DynamicMPPItest(unittest.TestCase):
             self.assertTrue(bool(result.feasible))
             self.assertTrue(np.isfinite(result.action).all())
             nominal = c.simulate(self.x0, result.state.U, self.cfg)
-            self.assertTrue(bool(c.trajectory_is_feasible(nominal, result.state.U, result.grid, self.cfg)))
+            self.assertTrue(bool(c.db.trajectory_is_feasible(nominal, result.state.U, self.cfg)))
             if emit_viz:
                 self.assertEqual(result.visualization.reference.shape, (self.cfg.H + 1, 4))
                 self.assertEqual(result.visualization.plan.shape, (self.cfg.H + 1, 8))
@@ -61,53 +61,23 @@ class DynamicMPPItest(unittest.TestCase):
         bad = jnp.tile(jnp.array([0., .4]), (self.cfg.H, 1))
         # First steering jump cannot be executed at the configured slew rate.
         bad_X = c.simulate(self.x0, bad, self.cfg)
-        self.assertFalse(bool(c.trajectory_is_feasible(bad_X, bad, self.grid, self.cfg)))
+        self.assertFalse(bool(c.db.trajectory_is_feasible(bad_X, bad, self.cfg)))
         samples = jnp.stack((bad, self.U))
         trajectories = jnp.stack((bad_X, self.X))
         selected = c.select_feasible_controls(bad, samples, trajectories,
-            jnp.zeros((2, self.cfg.H)), self.x0, self.grid, self.cfg)
+            jnp.zeros((2, self.cfg.H)), self.x0, self.cfg)
         np.testing.assert_array_equal(selected, self.U)
 
     def test_feasible_mean_is_kept(self):
         selected = c.select_feasible_controls(self.U, self.U[None], self.X[None],
-            jnp.zeros((1, self.cfg.H)), self.x0, self.grid, self.cfg)
+            jnp.zeros((1, self.cfg.H)), self.x0, self.cfg)
         np.testing.assert_array_equal(selected, self.U)
-
-    def test_blocked_horizon_reports_infeasible(self):
-        blocked = replace(self.grid, cells=jnp.full(self.grid.spec.shape, c.og.OCCUPIED, dtype=jnp.uint8))
-        solution = c.optimize_controls(self.state, self.x0,
-            c.build_reference(self.x0, self.course, self.cfg), blocked, self.cfg)
-        result = c.select_control_outputs(solution, self.x0,
-            c.build_reference(self.x0, self.course, self.cfg), blocked, self.cfg, False)
-        self.assertFalse(bool(result.feasible))
-        self.assertTrue(np.isfinite(result.action).all())
-        self.assertLessEqual(float(result.action[0]), 0.)
 
     def test_envelope_and_nonfinite_rejection(self):
         for column, value in ((4, 4.), (5, 10.), (3, -1.), (3, 5.), (0, float('nan'))):
             with self.subTest(column=column, value=value):
                 invalid = self.X.at[-1, column].set(value)
-                self.assertFalse(bool(c.trajectory_is_feasible(invalid, self.U, self.grid, self.cfg)))
-
-    def test_oriented_footprint_and_out_of_grid_are_checked(self):
-        local = jnp.array([[0., 0., 0.]])
-        self.assertTrue(bool(c.db.footprint_is_free(local, self.grid, self.cfg)[0]))
-        # Occupy front disc's center when body is rotated sideways, not COM cell.
-        row = int(self.grid.spec.middle[1] / self.grid.spec.resolution)
-        col = int((self.grid.spec.middle[0] + .2083) / self.grid.spec.resolution)
-        blocked = replace(self.grid, cells=self.grid.cells.at[row, col].set(c.og.OCCUPIED))
-        self.assertTrue(bool(c.db.footprint_is_free(local, blocked, self.cfg)[0]))
-        turned = local.at[0, 2].set(jnp.pi / 2)
-        self.assertFalse(bool(c.db.footprint_is_free(turned, blocked, self.cfg)[0]))
-        outside = local.at[0, 0].set(5.95)
-        self.assertFalse(bool(c.db.footprint_is_free(outside, self.grid, self.cfg)[0]))
-        # Unknown self-occluded cells are allowed only inside present footprint.
-        unknown = replace(self.grid, cells=jnp.full(self.grid.spec.shape, c.og.UNKNOWN, dtype=jnp.uint8))
-        self.assertTrue(bool(c.db.footprint_is_free(local, unknown, self.cfg)[0]))
-        moved = local.at[0, 0].set(.5)
-        self.assertFalse(bool(c.db.footprint_is_free(moved, unknown, self.cfg)[0]))
-        occupied_body = replace(unknown, cells=unknown.cells.at[row, int(3. / .1)].set(c.og.OCCUPIED))
-        self.assertFalse(bool(c.db.footprint_is_free(local, occupied_body, self.cfg)[0]))
+                self.assertFalse(bool(c.db.trajectory_is_feasible(invalid, self.U, self.cfg)))
 
     def test_course_tracking_cost_does_not_penalize_planned_body_slip(self):
         cfg = replace(self.cfg, Q=(0., 0., 1., 0.), Qf=(0., 0., 1., 0.),
@@ -128,7 +98,6 @@ class DynamicMPPItest(unittest.TestCase):
     def make_odom(self):
         return types.SimpleNamespace(
             child_frame_id='base_com',
-            header=types.SimpleNamespace(stamp=types.SimpleNamespace(sec=10, nanosec=50000000)),
             pose=types.SimpleNamespace(pose=types.SimpleNamespace(
                 position=types.SimpleNamespace(x=1., y=2.),
                 orientation=types.SimpleNamespace(w=1., x=0., y=0., z=0.))),
@@ -149,28 +118,22 @@ class DynamicMPPItest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'child_frame_id'):
             c.measured_state(msg, self.cfg)
 
-    def test_dynamic_sensor_freshness_uses_message_clock(self):
+    def test_feasible_result_publishes_without_checking_sensor_age(self):
+        node = object.__new__(c.MPPI)
+        node.config = self.cfg
+        node.get_clock = Mock(side_effect=AssertionError('unexpected age check'))
+        node._publish_stop, node._publish_drive = Mock(), Mock()
+        result = c.ControlResult(self.state, self.grid, jnp.array([0., .1]), None, jnp.bool_(True))
+        node._publish_control_result(result, self.obs, 'now')
+        node._publish_drive.assert_called_once()
+        node._publish_stop.assert_not_called()
+        node.get_clock.assert_not_called()
+
+    def test_odometry_does_not_require_timestamp(self):
         node = object.__new__(c.MPPI)
         node.config = self.cfg
         node.odom_callback(self.make_odom())
-        self.assertAlmostEqual(node._latest_odom_stamp, 10.05)
-        for now, sec, nanosec, expected in ((10.1, 10, 0, True),
-                                           (10.3, 10, 0, False),
-                                           (10.1, 9, 0, False),
-                                           (10.1, 11, 0, False)):
-            scan_stamp = types.SimpleNamespace(sec=sec, nanosec=nanosec)
-            self.assertEqual(node._sensors_fresh(now, scan_stamp), expected)
-
-    def test_plan_expiring_during_compute_is_not_published(self):
-        node = object.__new__(c.MPPI)
-        node.config = self.cfg
-        node.get_clock, node.get_logger = Mock(), Mock()
-        node.get_clock.return_value.now.return_value.nanoseconds = 11_000_000_000
-        node._latest_odom_stamp = 10.05
-        node._latest_scan = (types.SimpleNamespace(sec=10, nanosec=0),)
-        self.assertFalse(node._control_result_is_publishable(True))
-        node.get_clock.return_value.now.return_value.nanoseconds = 10_100_000_000
-        self.assertTrue(node._control_result_is_publishable(True))
+        np.testing.assert_allclose(node._latest_odom, [1., 2., 0., 3., -.4, .8])
 
     def test_publication_uses_same_speed_command_as_rollout(self):
         node = object.__new__(c.MPPI)

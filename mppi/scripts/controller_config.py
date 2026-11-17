@@ -53,10 +53,6 @@ class MPPIConfig:
     MAX_SIDESLIP: float = 0.6  # bounded slip allowed, not a slip reward [rad]
     MAX_YAW_RATE: float = 5.0  # rad/s
     ENVELOPE_WEIGHT: float = 100.0
-    BODY_FRONT: float = 0.30  # footprint extent from COM [m]
-    BODY_REAR: float = 0.25
-    BODY_HALF_WIDTH: float = 0.15
-    SENSOR_TIMEOUT: float = 0.2  # dynamic mode rejects stale odometry/scans [s]
 
     def __post_init__(self):
         """Reject unusable dynamic settings before tracing any rollout."""
@@ -70,8 +66,7 @@ class MPPIConfig:
         positive = ('MASS', 'YAW_INERTIA', 'WB', 'TIRE_MU', 'FRONT_STIFFNESS',
                     'REAR_STIFFNESS', 'SPEED_RESPONSE_TIME', 'MAX_STEER_RATE',
                     'BLEND_LOW_SPEED', 'LATERAL_RESPONSE_TIME', 'MAX_SIDESLIP',
-                    'MAX_YAW_RATE', 'ENVELOPE_WEIGHT', 'BODY_FRONT', 'BODY_REAR',
-                    'BODY_HALF_WIDTH', 'SENSOR_TIMEOUT', 'DT', 'MAX_SPEED')
+                    'MAX_YAW_RATE', 'ENVELOPE_WEIGHT', 'DT', 'MAX_SPEED')
         if any(not math.isfinite(getattr(self, name)) or getattr(self, name) <= 0
                for name in positive):
             raise ValueError('dynamic model scales must be finite and positive')

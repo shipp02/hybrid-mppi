@@ -5,12 +5,8 @@ State: [COM x, COM y, body yaw, body vx, body vy, yaw rate,
 Input: [speed-setpoint slew (m/s^2), steering command (rad)].
 Steering command slew is modeled, but unmeasured servo lag is not.
 """
-import math
-
 import jax
 import jax.numpy as jnp
-
-from occupancy_grid import FREE, UNKNOWN
 
 
 def project_controls(U, x0, cfg):
@@ -110,59 +106,12 @@ def envelope_excess(X, cfg):
     return jnp.stack((slip, rate, speed, reverse), axis=-1)
 
 
-def footprint_cells(local, grid, cfg):
-    """Rasterize oriented rectangles using rectangle/cell separating axes."""
-    resolution = grid.spec.resolution
-    reach = math.ceil(math.hypot(max(cfg.BODY_FRONT, cfg.BODY_REAR),
-                                cfg.BODY_HALF_WIDTH) / resolution) + 1
-    offsets = jnp.arange(-reach, reach + 1)
-    dr, dc = jnp.meshgrid(offsets, offsets, indexing='ij')
-    origin_row = jnp.floor((local[:, 0] + grid.spec.middle[1]) / resolution).astype(int)
-    origin_col = jnp.floor((local[:, 1] + grid.spec.middle[0]) / resolution).astype(int)
-    row = origin_row[:, None] + dr.ravel()
-    col = origin_col[:, None] + dc.ravel()
-    forward = (row + .5) * resolution - grid.spec.middle[1]
-    left = (col + .5) * resolution - grid.spec.middle[0]
-    c, s = jnp.cos(local[:, 2:3]), jnp.sin(local[:, 2:3])
-    center_offset = (cfg.BODY_FRONT - cfg.BODY_REAR) / 2
-    half_length = (cfg.BODY_FRONT + cfg.BODY_REAR) / 2
-    dx = forward - local[:, :1] - center_offset * c
-    dy = left - local[:, 1:2] - center_offset * s
-    cell_half = resolution / 2
-    projected_cell = cell_half * (jnp.abs(c) + jnp.abs(s))
-    intersects = ((jnp.abs(c * dx + s * dy) <= half_length + projected_cell)
-                  & (jnp.abs(-s * dx + c * dy) <= cfg.BODY_HALF_WIDTH + projected_cell)
-                  & (jnp.abs(dx) <= half_length * jnp.abs(c) + cfg.BODY_HALF_WIDTH * jnp.abs(s) + cell_half)
-                  & (jnp.abs(dy) <= half_length * jnp.abs(s) + cfg.BODY_HALF_WIDTH * jnp.abs(c) + cell_half))
-    # Unknown cells overlapping present body are self-occluded, not new space.
-    # Occupied cells are NEVER cleared. No unseen clearance halo is assumed.
-    at_current_body = ((forward + cell_half >= -cfg.BODY_REAR)
-                       & (forward - cell_half <= cfg.BODY_FRONT)
-                       & (jnp.abs(left) <= cfg.BODY_HALF_WIDTH + cell_half))
-    return row, col, intersects, at_current_body
-
-
-def footprint_is_free(local, grid, cfg):
-    """Check every intersected cell, body orientation, unknown space and edges.
-
-    Uses raw occupancy, not center-point inflation. Initial self-occluded body
-    cells may be unknown; new unknown space and all occupied cells block motion.
-    """
-    row, col, intersects, at_current_body = footprint_cells(local, grid, cfg)
-    rows, cols = grid.spec.shape
-    in_grid = (row >= 0) & (row < rows) & (col >= 0) & (col < cols)
-    cells = grid.cells[jnp.clip(row, 0, rows - 1), jnp.clip(col, 0, cols - 1)]
-    known_free = (cells == FREE) | ((cells == UNKNOWN) & at_current_body)
-    return jnp.all(~intersects | (in_grid & known_free), axis=1)
-
-
-def trajectory_is_feasible(X, U, local, grid, cfg):
-    """Finite, bounded motion and reachable commands in sensed free space."""
+def trajectory_is_feasible(X, U, cfg):
+    """Check finite, bounded motion and reachable commands, not occupancy."""
     excess = envelope_excess(X[1:], cfg)
     previous_steer = jnp.concatenate((X[:1, 6], U[:-1, 1]))
     slew_ok = jnp.all(jnp.abs(U[:, 1] - previous_steer) <= cfg.MAX_STEER_RATE * cfg.DT + 1e-5)
     bounds_ok = jnp.all((U >= jnp.array([cfg.MIN_ACCEL, cfg.MIN_STEER]) - 1e-5)
                         & (U <= jnp.array([cfg.MAX_ACCEL, cfg.MAX_STEER]) + 1e-5))
     return (jnp.all(jnp.isfinite(X)) & jnp.all(jnp.isfinite(U))
-            & jnp.all(excess <= 1e-5) & slew_ok & bounds_ok
-            & jnp.all(footprint_is_free(local, grid, cfg)))
+            & jnp.all(excess <= 1e-5) & slew_ok & bounds_ok)
