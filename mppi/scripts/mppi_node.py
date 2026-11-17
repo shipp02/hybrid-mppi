@@ -177,20 +177,18 @@ def cost(X, U, ref, cfg, grid):
 
     error = error.at[:, 2].set(yaw_error)
     
-    # Map rollout trajectory into local car frame for collision/distance evaluation
+    # Map rollout trajectory into local car frame for collision evaluation
     local_traj = trajectory_to_car_frame(X[1:], X[0, 0], X[0, 1], X[0, 2])
     
-    # Evaluate obstacle proximity using the immutable JAX occupancy grid
+    # Evaluate collisions using the immutable JAX occupancy grid
     obs_blocked = grid.is_free(local_traj)
-    obs_dist = grid.clearance(local_traj)
-
-    obs_cost = 0.0
     # Arc length from the car to each rollout point, including the first segment.
     local_xy = jnp.concatenate((jnp.zeros((1, 2)), local_traj[:, :2]), axis=0)
     path_dist = jnp.cumsum(jnp.linalg.norm(jnp.diff(local_xy, axis=0), axis=1))
     # Distance in meters: 10 at the car, 5 at 1 m, decreasing farther ahead.
     blocked_penalty = 1e1 / (1.0 + path_dist)
-    obs_block_cost = jnp.sum(jnp.where(~obs_blocked, blocked_penalty, 0.0))
+    # Keep timestep costs separate: mppi_update owns horizon/cost-to-go sums.
+    obs_block_cost = jnp.where(~obs_blocked, blocked_penalty, 0.0)
 
     # position error in the frame of the reference: [lag, lateral]. From rest the
     # reference runs ahead of the car, and a plain x/y error is then all lag,
@@ -221,7 +219,7 @@ def cost(X, U, ref, cfg, grid):
         axis=1
     )
 
-    return state_cost + input_cost + input_difference_cost + obs_cost + obs_block_cost
+    return state_cost + input_cost + input_difference_cost + obs_block_cost
 
 
 def sample_controls(key, U, U_std, cfg):
@@ -398,6 +396,15 @@ def control_step(state, observation, course, grid, cfg, *, emit_viz=False):
         solution, observation.x0, reference, grid, cfg, emit_viz)
 
 
+@partial(jax.jit, static_argnames=("cfg", "emit_viz"))
+def tracking_control_step(state, observation, course, grid, cfg, *, emit_viz=False):
+    """Keep optimization on device; export only selected nominal, never sample batch."""
+    result = control_step(
+        state, observation, course, grid, cfg, emit_viz=emit_viz)
+    nominal = simulate(observation.x0, result.state.U, cfg)
+    return result, nominal
+
+
 class MPPI(Node):
     """
     Implement Kinematic MPPI on the car
@@ -416,7 +423,16 @@ class MPPI(Node):
             default = getattr(MPPIConfig, field)
             self.declare_parameter(field.lower(), default)
             overrides[field] = type(default)(self.get_parameter(field.lower()).value)
+        self.declare_parameter('horizon', MPPIConfig.H)
+        overrides['H'] = int(self.get_parameter('horizon').value)
+        if overrides['H'] < 1:
+            raise ValueError('horizon must be positive')
         self.config = replace(MPPIConfig(), **overrides)
+        self.declare_parameter('tracker', 'none')
+        self.declare_parameter('tracker_prebuilt_dir', '')
+        self.declare_parameter('tracker_max_steer_rate', float(np.pi))
+        self.tracker = self._create_tracker()
+        self._last_tracker_action = np.zeros(2)
 
         self.control_state = ControllerState(
             jax.random.PRNGKey(0),
@@ -493,6 +509,21 @@ class MPPI(Node):
 
         self.get_logger().info(f'MPPI initialized on {track}; waiting for LiDAR extrinsics')
 
+    def _create_tracker(self):
+        """Optional host solver; default MPPI path needs no acados installation."""
+        tracker = self.get_parameter('tracker').value
+        if tracker == 'none':
+            return None
+        if tracker != 'acados':
+            raise ValueError('tracker must be none or acados')
+        from acados_tracker import AcadosTracker
+        prebuilt_directory = self.get_parameter('tracker_prebuilt_dir').value
+        return AcadosTracker(
+            self.config,
+            max_steer_rate=self.get_parameter('tracker_max_steer_rate').value,
+            export_directory=prebuilt_directory or None,
+            generate=not bool(prebuilt_directory))
+
     def _configure_device(self):
         """Select backend before allocating state; GPU requests never fall back."""
         self.declare_parameter('use_cpu', False)
@@ -517,8 +548,9 @@ class MPPI(Node):
             np.zeros(self.grid.spec.num_beams, dtype=np.float32),
             np.float32(self.config.DT), np.bool_(False),
         )
+        compute = tracking_control_step if self.tracker is not None else control_step
         for emit_viz in ((False, True) if self.visualize else (False,)):
-            result = control_step(
+            result = compute(
                 self.control_state, observation, self.course, self.grid,
                 self.config, emit_viz=emit_viz)
             jax.block_until_ready(result)
@@ -601,11 +633,34 @@ class MPPI(Node):
         if observation is None:
             return
         control_start = time.perf_counter()
-        result = control_step(
+        if self.tracker is None:
+            result = control_step(
+                self.control_state, observation, self.course, self.grid,
+                self.config, emit_viz=self._visualization_due(now))
+            self._publish_control_result(result, observation, now)
+        else:
+            self._track_and_publish(observation, now)
+        self._log_control_stats(control_start)
+
+    def _track_and_publish(self, observation, now):
+        """Plan on GPU, track on CPU, then publish one command."""
+        result, nominal = tracking_control_step(
             self.control_state, observation, self.course, self.grid,
             self.config, emit_viz=self._visualization_due(now))
-        self._publish_control_result(result, observation, now)
-        self._log_control_stats(control_start)
+        self.control_state, self.grid = result.state, result.grid
+        states, controls = jax.device_get((nominal, result.state.U))
+        try:
+            tracked = self.tracker.solve(
+                observation.x0, states, controls, self._last_tracker_action)
+        except (RuntimeError, ValueError) as exc:
+            self.get_logger().error(f'Tracker rejected command: {exc}', throttle_duration_sec=1.0)
+            self._publish_stop(now)
+            return
+        self._last_tracker_action = tracked[0].copy()
+        self._publish_drive(tracked[0], observation.x0, now)
+        if result.visualization is not None:
+            self._last_visualization_time = now.nanoseconds * 1e-9
+            self.publish_markers(jax.device_get(result.visualization))
 
     def _visualization_due(self, now):
         return (self.visualize
@@ -713,6 +768,7 @@ class MPPI(Node):
         self._stats_window_start = end
 
     def _publish_stop(self, stamp):
+        self._last_tracker_action = np.zeros(2)
         msg = AckermannDriveStamped()
         msg.header.stamp = stamp.to_msg()
         msg.drive.speed = 0.0
