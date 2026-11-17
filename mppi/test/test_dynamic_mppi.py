@@ -30,23 +30,22 @@ class DynamicMPPItest(unittest.TestCase):
                                        jnp.float32(.05), jnp.bool_(False))
 
     def test_compiled_direct_control_and_visualization(self):
-        for emit_viz in (False, True):
+        for export_path in (False, True):
             args = self.state, self.obs, self.course, self.grid, self.cfg
-            result = c.control_step(*args, emit_viz=emit_viz)
+            result = c.control_step(*args, export_path=export_path)
             jax.block_until_ready(result)
             with jax.transfer_guard('disallow'):
-                resident = c.control_step(*args, emit_viz=emit_viz)
+                resident = c.control_step(*args, export_path=export_path)
                 jax.block_until_ready(resident)
             self.assertTrue(bool(result.feasible))
             self.assertTrue(np.isfinite(result.action).all())
             nominal = c.simulate(self.x0, result.state.U, self.cfg)
             self.assertTrue(bool(c.db.trajectory_is_feasible(nominal, result.state.U, self.cfg)))
-            if emit_viz:
-                self.assertEqual(result.visualization.reference.shape, (self.cfg.H + 1, 4))
-                self.assertEqual(result.visualization.plan.shape, (self.cfg.H + 1, 8))
-                np.testing.assert_allclose(result.visualization.plan, nominal, atol=1e-6)
+            if export_path:
+                self.assertEqual(result.path_xy.shape, (self.cfg.H + 1, 2))
+                np.testing.assert_allclose(result.path_xy, nominal[:, :2], atol=1e-6)
             else:
-                self.assertIsNone(result.visualization)
+                self.assertIsNone(result.path_xy)
 
     def test_sampling_retains_nominal_and_respects_command_slew(self):
         samples = c.sample_rollout_controls(self.state.key, self.U, self.state.U_std,
@@ -123,6 +122,7 @@ class DynamicMPPItest(unittest.TestCase):
         node.config = self.cfg
         node.get_clock = Mock(side_effect=AssertionError('unexpected age check'))
         node._publish_stop, node._publish_drive = Mock(), Mock()
+        node.path_publisher = None
         result = c.ControlResult(self.state, self.grid, jnp.array([0., .1]), None, jnp.bool_(True))
         node._publish_control_result(result, self.obs, 'now')
         node._publish_drive.assert_called_once()

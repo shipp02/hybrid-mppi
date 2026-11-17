@@ -22,7 +22,8 @@ def load_controller():
     path = SCRIPTS / 'mppi_node.py'
     tree = ast.parse(path.read_text(), filename=str(path))
     allowed = {'dataclasses', 'functools', 'typing', 'time', 'jax', 'jax.numpy',
-               'numpy', 'utils', 'occupancy_grid', 'controller_config', 'dynamic_bicycle', 'os'}
+               'numpy', 'utils', 'occupancy_grid', 'controller_config', 'dynamic_bicycle',
+               'selected_path_publisher', 'os'}
     tree.body = [node for node in tree.body
                  if isinstance(node, (ast.FunctionDef, ast.ClassDef))
                  or isinstance(node, ast.ImportFrom) and node.module in allowed
@@ -84,33 +85,29 @@ class ControlStepTest(unittest.TestCase):
                 obs = self.observation._replace(
                     elapsed=jnp.float32(elapsed), reset=jnp.bool_(reset))
                 expected, grid, ref, samples, weights = self.legacy_step(state, obs, cfg)
-                for emit_viz in (False, True):
+                for export_path in (False, True):
                     with self.subTest(covariance=covariance, elapsed=elapsed,
-                                      reset=reset, emit_viz=emit_viz):
+                                      reset=reset, export_path=export_path):
                         result = controller.control_step(
-                            state, obs, self.course, self.grid, cfg, emit_viz=emit_viz)
+                            state, obs, self.course, self.grid, cfg, export_path=export_path)
                         for actual, wanted in zip(result.state, expected):
                             np.testing.assert_allclose(actual, wanted, rtol=2e-5, atol=2e-5)
                         np.testing.assert_allclose(result.action, expected.U[0], atol=2e-5)
                         np.testing.assert_array_equal(result.grid.cells, grid.cells)
                         np.testing.assert_allclose(result.grid.free_distance, grid.free_distance)
-                        if emit_viz:
-                            viz = result.visualization
-                            np.testing.assert_allclose(viz.reference, ref, atol=2e-5)
-                            np.testing.assert_allclose(viz.samples, samples[:50], atol=2e-5)
-                            np.testing.assert_allclose(viz.weights, weights[:50, 0], atol=2e-5)
-                            np.testing.assert_allclose(viz.plan, controller.simulate(
-                                obs.x0, result.state.U, cfg), atol=2e-5)
+                        if export_path:
+                            np.testing.assert_allclose(result.path_xy, controller.simulate(
+                                obs.x0, result.state.U, cfg)[:, :2], atol=2e-5)
                         else:
-                            self.assertIsNone(result.visualization)
+                            self.assertIsNone(result.path_xy)
                 state = expected
 
     def test_resident_dispatch_requires_no_host_transfers(self):
-        for emit_viz in (False, True):
+        for export_path in (False, True):
             args = (self.state, self.observation, self.course, self.grid, self.cfg)
-            jax.block_until_ready(controller.control_step(*args, emit_viz=emit_viz))
+            jax.block_until_ready(controller.control_step(*args, export_path=export_path))
             with jax.transfer_guard('disallow'):
-                result = controller.control_step(*args, emit_viz=emit_viz)
+                result = controller.control_step(*args, export_path=export_path)
                 jax.block_until_ready(result)
             self.assertEqual(result.action.devices(), self.state.U.devices())
 
@@ -121,7 +118,7 @@ class ControlStepTest(unittest.TestCase):
         node.tracker = None
         node.get_clock = Mock()
         node._prepare_control_observation = Mock(return_value=self.observation)
-        node._visualization_due = Mock(return_value=True)
+        node.path_publisher = None
         node._publish_control_result = Mock()
         node._log_control_stats = Mock()
         with patch.object(controller, 'control_step', wraps=controller.control_step) as dispatch:
@@ -134,12 +131,12 @@ class ControlStepTest(unittest.TestCase):
         node.control_state, node.course, node.grid, node.config = (
             self.state, self.course, self.grid, self.cfg)
         node.tracker = None
-        node.visualize = True
+        node.path_publisher = Mock()
         node.get_logger = Mock()
         with patch.object(controller, 'control_step', wraps=controller.control_step) as dispatch:
             node._warm_up()
-            self.assertEqual([call.kwargs['emit_viz'] for call in dispatch.call_args_list],
-                             [False, True])
+            dispatch.assert_called_once()
+            self.assertTrue(dispatch.call_args.kwargs['export_path'])
         self.assertIs(node.control_state, self.state)
 
 

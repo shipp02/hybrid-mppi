@@ -16,6 +16,7 @@ def generate_launch_description():
             'tracker', default_value='none', description='none or acados'),
         DeclareLaunchArgument(
             'dynamics', default_value='kinematic', description='kinematic or dynamic (direct MPPI)'),
+        DeclareLaunchArgument('publish_selected_paths', default_value='false'),
         DeclareLaunchArgument('use_cpu', default_value='false'),
         DeclareLaunchArgument('horizon', default_value='40'),
         DeclareLaunchArgument('max_speed', default_value='6.0'),
@@ -29,7 +30,8 @@ def generate_launch_description():
                 'use_cpu': ParameterValue(LaunchConfiguration('use_cpu'), value_type=bool),
                 'horizon': ParameterValue(LaunchConfiguration('horizon'), value_type=int),
                 'max_speed': ParameterValue(LaunchConfiguration('max_speed'), value_type=float),
-                'visualize': False,
+                'publish_selected_paths': ParameterValue(
+                    LaunchConfiguration('publish_selected_paths'), value_type=bool),
                 'tracker': LaunchConfiguration('tracker'),
                 'dynamics': LaunchConfiguration('dynamics'),
             }],

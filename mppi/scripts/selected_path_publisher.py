@@ -1,0 +1,167 @@
+"""Bounded selected-path transport and off-process ROS marker publication.
+
+Only XY snapshots cross the process boundary. No JAX work or rollout samples
+belong in the publisher. Slow readers never block the control process.
+"""
+from dataclasses import dataclass
+import multiprocessing as mp
+
+import numpy as np
+
+HISTORY_SIZE = 10
+PUBLISH_PERIOD = 0.5
+TOPIC = '/mppi/selected_paths'
+
+
+@dataclass(frozen=True)
+class PathSnapshot:
+    xy: np.ndarray
+    stamps: np.ndarray
+    sequence: int
+
+
+class SharedPathHistory:
+    """Single writer, single reader ring; rejected writes never wait for reader."""
+
+    def __init__(self, context, points, capacity=HISTORY_SIZE):
+        self.points = points
+        self.capacity = capacity
+        self._xy = context.RawArray('f', capacity * points * 2)
+        self._stamps = context.RawArray('q', capacity)
+        self._sequence = context.RawValue('Q', 0)
+        self._lock = context.Lock()
+
+    def try_record(self, xy, stamp_ns):
+        """Copy one complete path, or drop it immediately on reader contention."""
+        xy = np.asarray(xy, dtype=np.float32)
+        if xy.shape != (self.points, 2) or not np.isfinite(xy).all():
+            return False
+        if not self._lock.acquire(False):
+            return False
+        try:
+            slot = self._sequence.value % self.capacity
+            np.frombuffer(self._xy, dtype=np.float32).reshape(self.capacity, self.points, 2)[slot] = xy
+            np.frombuffer(self._stamps, dtype=np.int64)[slot] = stamp_ns
+            self._sequence.value += 1
+        finally:
+            self._lock.release()
+        return True
+
+    def snapshot(self):
+        """Copy latest paths oldest-first; release lock before building messages."""
+        with self._lock:
+            sequence = self._sequence.value
+            count = min(sequence, self.capacity)
+            slots = np.arange(sequence - count, sequence, dtype=np.int64) % self.capacity
+            xy = np.frombuffer(self._xy, dtype=np.float32).reshape(self.capacity, self.points, 2)[slots].copy()
+            stamps = np.frombuffer(self._stamps, dtype=np.int64)[slots].copy()
+        return PathSnapshot(xy, stamps, sequence)
+
+
+def segment_geometry(xy):
+    """LINE_LIST pairs with identical endpoint colors: solid red-to-blue segments."""
+    segments = len(xy) - 1
+    pairs = np.stack((xy[:-1], xy[1:]), axis=1).reshape((-1, 2))
+    fraction = np.linspace(0., 1., segments, dtype=np.float32)
+    colors = np.stack((1. - fraction, np.zeros(segments), fraction), axis=1)
+    return pairs, np.repeat(colors, 2, axis=0)
+
+
+def build_markers(snapshot, frame, capacity=HISTORY_SIZE):
+    """Build self-contained history; stable IDs plus deletes tolerate dropped batches."""
+    from geometry_msgs.msg import Point
+    from std_msgs.msg import ColorRGBA
+    from visualization_msgs.msg import Marker, MarkerArray
+
+    markers = MarkerArray()
+    for index, (xy, stamp) in enumerate(zip(snapshot.xy, snapshot.stamps)):
+        marker = Marker()
+        marker.header.frame_id = frame
+        marker.header.stamp.sec = int(stamp) // 1_000_000_000
+        marker.header.stamp.nanosec = int(stamp) % 1_000_000_000
+        marker.ns = 'selected_mppi_paths'
+        marker.id = index
+        marker.type = Marker.LINE_LIST
+        marker.action = Marker.ADD
+        marker.pose.orientation.w = 1.
+        marker.scale.x = .025
+        marker.lifetime.sec = 2
+        pairs, colors = segment_geometry(xy)
+        marker.points = [Point(x=float(x), y=float(y), z=0.) for x, y in pairs]
+        alpha = .25 + .75 * (index + 1) / len(snapshot.xy)
+        marker.color.a = alpha
+        marker.colors = [ColorRGBA(r=float(r), g=float(g), b=float(b), a=alpha)
+                         for r, g, b in colors]
+        markers.markers.append(marker)
+    for index in range(len(snapshot.xy), capacity):
+        marker = Marker()
+        marker.header.frame_id = frame
+        marker.ns = 'selected_mppi_paths'
+        marker.id = index
+        marker.action = Marker.DELETE
+        markers.markers.append(marker)
+    return markers
+
+
+def publisher_qos():
+    """No delivery backlog, replay, or reliability requirement for debug output."""
+    from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
+
+    return QoSProfile(history=HistoryPolicy.KEEP_LAST, depth=1,
+                      reliability=ReliabilityPolicy.BEST_EFFORT,
+                      durability=DurabilityPolicy.VOLATILE)
+
+
+class HistoryPublication:
+    """Own snapshot acquisition and ROS work, exclusively in the child process."""
+
+    def __init__(self, node, history, frame):
+        from visualization_msgs.msg import MarkerArray
+
+        self.history = history
+        self.frame = frame
+        self.publisher = node.create_publisher(MarkerArray, TOPIC, publisher_qos())
+        self.timer = node.create_timer(PUBLISH_PERIOD, self.publish)
+
+    def publish(self):
+        snapshot = self.history.snapshot()
+        if snapshot.sequence:
+            self.publisher.publish(build_markers(snapshot, self.frame, self.history.capacity))
+
+
+def run_publisher(history, stop, frame):
+    """Spawn entry point: independent ROS node, no inherited CUDA context."""
+    import rclpy
+    from rclpy.node import Node
+    from rclpy.executors import ExternalShutdownException
+
+    rclpy.init(args=[])
+    node = Node('mppi_selected_path_publisher')
+    publication = HistoryPublication(node, history, frame)
+    try:
+        while not stop.is_set() and rclpy.ok():
+            rclpy.spin_once(node, timeout_sec=.1)
+    except (KeyboardInterrupt, ExternalShutdownException):
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.try_shutdown()
+
+
+class PathPublisherProcess:
+    """Own spawned process and bounded shared history; call close on node shutdown."""
+
+    def __init__(self, points, frame='map'):
+        context = mp.get_context('spawn')
+        self.history = SharedPathHistory(context, points)
+        self._stop = context.Event()
+        self._process = context.Process(target=run_publisher,
+            args=(self.history, self._stop, frame), daemon=True)
+        self._process.start()
+
+    def close(self):
+        self._stop.set()
+        self._process.join(timeout=2.)
+        if self._process.is_alive():
+            self._process.terminate()
+            self._process.join(timeout=2.)

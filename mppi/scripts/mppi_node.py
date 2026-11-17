@@ -18,8 +18,7 @@ import dynamic_bicycle as db
 
 import os
 from nav_msgs.msg import Odometry
-from geometry_msgs.msg import Point
-from visualization_msgs.msg import Marker, MarkerArray
+from selected_path_publisher import PathPublisherProcess
 from sensor_msgs.msg import LaserScan
 from rclpy.time import Time
 from tf2_ros import Buffer, TransformListener, TransformException
@@ -348,18 +347,11 @@ class OptimizationResult(NamedTuple):
     weights: jax.Array
 
 
-class Visualization(NamedTuple):
-    reference: jax.Array
-    samples: jax.Array
-    weights: jax.Array
-    plan: jax.Array
-
-
 class ControlResult(NamedTuple):
     state: ControllerState
     grid: og.OccupancyGrid
     action: jax.Array
-    visualization: Visualization | None
+    path_xy: jax.Array | None
     feasible: jax.Array = True
 
 
@@ -395,37 +387,36 @@ def optimize_controls(state, x0, reference, grid, cfg):
     return OptimizationResult(ControllerState(key, U, U_std), samples, weights)
 
 
-def select_control_outputs(solution, x0, reference, grid, cfg, emit_viz):
-    """Select action and bounded debug payload before crossing to the host."""
-    visualization = None
+def select_control_outputs(solution, x0, grid, cfg, export_path):
+    """Export only selected XY, reusing the nominal required by dynamic checks."""
+    path_xy = None
     feasible = jnp.bool_(True)
-    if emit_viz or cfg.DYNAMICS == 'dynamic':
+    if export_path or cfg.DYNAMICS == 'dynamic':
         nominal = simulate(x0, solution.state.U, cfg)
         if cfg.DYNAMICS == 'dynamic':
             feasible = db.trajectory_is_feasible(nominal, solution.state.U, cfg)
-        if emit_viz:
-            visualization = Visualization(
-                reference, solution.samples[:50], solution.weights[:50, 0], nominal)
+        if export_path:
+            path_xy = nominal[:, :2]
     return ControlResult(
-        solution.state, grid, solution.state.U[0], visualization, feasible)
+        solution.state, grid, solution.state.U[0], path_xy, feasible)
 
 
-@partial(jax.jit, static_argnames=("cfg", "emit_viz"))
-def control_step(state, observation, course, grid, cfg, *, emit_viz=False):
+@partial(jax.jit, static_argnames=("cfg", "export_path"))
+def control_step(state, observation, course, grid, cfg, *, export_path=False):
     """One compiled dispatch; helpers preserve domain responsibility boundaries."""
     state = prepare_warm_start(state, observation, cfg)
     grid = grid.from_scan(observation.ranges)
     reference = build_reference(observation.x0, course, cfg)
     solution = optimize_controls(state, observation.x0, reference, grid, cfg)
     return select_control_outputs(
-        solution, observation.x0, reference, grid, cfg, emit_viz)
+        solution, observation.x0, grid, cfg, export_path)
 
 
-@partial(jax.jit, static_argnames=("cfg", "emit_viz"))
-def tracking_control_step(state, observation, course, grid, cfg, *, emit_viz=False):
+@partial(jax.jit, static_argnames=("cfg",))
+def tracking_control_step(state, observation, course, grid, cfg):
     """Keep optimization on device; export only selected nominal, never sample batch."""
     result = control_step(
-        state, observation, course, grid, cfg, emit_viz=emit_viz)
+        state, observation, course, grid, cfg)
     nominal = simulate(observation.x0, result.state.U, cfg)
     return result, nominal
 
@@ -494,7 +485,6 @@ class MPPI(Node):
         self._latest_scan = None
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
-        self._last_visualization_time = 0.0
         self._control_latencies = []
         self._control_periods = []
         self._last_control_start = None
@@ -533,10 +523,11 @@ class MPPI(Node):
             self.waypoints[:, :2], yaw, self.waypoints[:, 3],
         )).astype(np.float32), self.device)
 
-        self.declare_parameter('visualize', True)
-        self.visualize = self.get_parameter('visualize').value
-        if self.visualize:
-            self.marker_publisher = self.create_publisher(MarkerArray, '/mppi/markers', 1)
+        self.declare_parameter('publish_selected_paths', False)
+        self.declare_parameter('path_frame', 'map')
+        self.path_publisher = (
+            PathPublisherProcess(self.config.H + 1, self.get_parameter('path_frame').value)
+            if self.get_parameter('publish_selected_paths').value else None)
 
         self.get_logger().info(f'MPPI initialized on {track}; waiting for LiDAR extrinsics')
 
@@ -588,12 +579,14 @@ class MPPI(Node):
             np.zeros(self.grid.spec.num_beams, dtype=np.float32),
             np.float32(self.config.DT), np.bool_(False),
         )
-        compute = tracking_control_step if self.tracker is not None else control_step
-        for emit_viz in ((False, True) if self.visualize else (False,)):
-            result = compute(
+        if self.tracker is None:
+            result = control_step(
                 self.control_state, observation, self.course, self.grid,
-                self.config, emit_viz=emit_viz)
-            jax.block_until_ready(result)
+                self.config, export_path=self.path_publisher is not None)
+        else:
+            result = tracking_control_step(
+                self.control_state, observation, self.course, self.grid, self.config)
+        jax.block_until_ready(result)
         self.get_logger().info(f'MPPI ready: {self.config}')
 
     def odom_callback(self, msg):
@@ -669,7 +662,7 @@ class MPPI(Node):
         if self.tracker is None:
             result = control_step(
                 self.control_state, observation, self.course, self.grid,
-                self.config, emit_viz=self._visualization_due(now))
+                self.config, export_path=self.path_publisher is not None)
             self._publish_control_result(result, observation, now)
         else:
             self._track_and_publish(observation, now)
@@ -679,7 +672,7 @@ class MPPI(Node):
         """Plan on GPU, track on CPU, then publish one command."""
         result, nominal = tracking_control_step(
             self.control_state, observation, self.course, self.grid,
-            self.config, emit_viz=self._visualization_due(now))
+            self.config)
         self.control_state, self.grid = result.state, result.grid
         states, controls = jax.device_get((nominal, result.state.U))
         try:
@@ -691,13 +684,8 @@ class MPPI(Node):
             return
         self._last_tracker_action = tracked[0].copy()
         self._publish_drive(tracked[0], observation.x0, now)
-        if result.visualization is not None:
-            self._last_visualization_time = now.nanoseconds * 1e-9
-            self.publish_markers(jax.device_get(result.visualization))
-
-    def _visualization_due(self, now):
-        return (self.visualize
-                and now.nanoseconds * 1e-9 - self._last_visualization_time >= 0.2)
+        if self.path_publisher is not None:
+            self.path_publisher.history.try_record(states[:, :2], now.nanoseconds)
 
     def _prepare_control_observation(self, now):
         """Validate sensors and compute host-side timing/reset policy."""
@@ -753,17 +741,16 @@ class MPPI(Node):
         """Keep persistent arrays resident; read back only publication outputs."""
         self.control_state = result.state
         self.grid = result.grid
-        action, visualization, feasible = jax.device_get(
-            (result.action, result.visualization, result.feasible))
+        action, feasible = jax.device_get((result.action, result.feasible))
         if not feasible:
             self.get_logger().warning(
                 'No model-feasible MPPI trajectory; stopping', throttle_duration_sec=1.0)
             self._publish_stop(now)
             return
         self._publish_drive(action, observation.x0, now)
-        if visualization is not None:
-            self._last_visualization_time = now.nanoseconds * 1e-9
-            self.publish_markers(visualization)
+        if self.path_publisher is not None:
+            path_xy = jax.device_get(result.path_xy)
+            self.path_publisher.history.try_record(path_xy, now.nanoseconds)
 
     def _publish_drive(self, action, x0, now):
         drive_msg = AckermannDriveStamped()
@@ -785,7 +772,7 @@ class MPPI(Node):
     def _log_control_stats(self, start):
         """Wall-clock hot-path timings, synchronized by the selected-action readback.
 
-        Includes ROS drive publication and optional visualization. Excludes input
+        Includes drive publication and optional selected-XY readback/copy. Excludes input
         checks, TF lookup, warmup, skipped ticks, and this summary's logging cost.
         """
         end = time.perf_counter()
@@ -811,7 +798,7 @@ class MPPI(Node):
             f'{np.percentile(latency_ms, 95):.2f}/{latency_ms.max():.2f}, '
             f'period ms mean/p95/max={period_stats}, '
             f'latency > {self.config.DT * 1e3:.1f} ms: {overruns}/{latency_ms.size}, '
-            f'visualize={self.visualize}'
+            f'publish_selected_paths={self.path_publisher is not None}'
         )
         self._control_latencies.clear()
         self._control_periods.clear()
@@ -826,31 +813,11 @@ class MPPI(Node):
         msg.drive.steering_angle = 0.0
         self.drive_publisher.publish(msg)
 
-    def publish_markers(self, visualization):
-        """Publish host-only reference, optimized plan, and sampled rollouts."""
-        ref, X_samples, w, plan = visualization
-        w = w / (w.max() + 1e-12)
-
-        def line(i, points, r, g, b, width):
-            marker = Marker()
-            marker.header.frame_id = 'map'
-            marker.header.stamp = self.get_clock().now().to_msg()
-            marker.ns = 'mppi'
-            marker.id = i
-            marker.type = Marker.LINE_STRIP
-            marker.scale.x = width
-            marker.color.r, marker.color.g, marker.color.b = float(r), float(g), float(b)
-            marker.color.a = 1.0
-            marker.points = [Point(x=float(p[0]), y=float(p[1])) for p in points]
-            return marker
-
-        markers = MarkerArray()
-        markers.markers.append(line(0, ref, 0.0, 1.0, 0.0, 0.05))
-        markers.markers.append(line(1, plan, 1.0, 0.0, 0.0, 0.05))
-        for k in range(len(X_samples)):
-            markers.markers.append(
-                line(2 + k, X_samples[k], 1.0 - w[k], 1.0 - w[k], 1.0, 0.01))
-        self.marker_publisher.publish(markers)
+    def destroy_node(self):
+        """Release the optional publisher process before shutting down ROS."""
+        if self.path_publisher is not None:
+            self.path_publisher.close()
+        return super().destroy_node()
 
 
 def main(args=None):
