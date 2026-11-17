@@ -4,7 +4,8 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class MPPIConfig:
-    NX: int = 4  # length of state vector: x = [p_x, p_y, yaw, v]
+    NX: int = 4  # derived from DYNAMICS: 4 kinematic, 8 dynamic states
+    DYNAMICS: str = "kinematic"  # opt-in "dynamic"; direct MPPI only
     NU: int = 2  # length of input vector: u = [a, delta]
     T: int = 1024  # number of sampled control sequences
     H: int = 40  # horizon length
@@ -34,3 +35,52 @@ class MPPIConfig:
     MAX_ACCEL: float = 3.0  # maximum acceleration [m/ss]
     MIN_SPEED: float = 0.0  # minimum speed [m/s]
     MAX_SPEED: float = 6.0  # maximum speed [m/s]
+
+    # Dynamic bicycle starting estimates, NOT identified real-car parameters.
+    MASS: float = 3.5  # kg
+    YAW_INERTIA: float = 0.05  # kg m^2
+    FRONT_LENGTH: float = 0.16  # COM to front axle [m]; rear length = WB - this
+    TIRE_MU: float = 0.8
+    FRONT_STIFFNESS: float = 20.0  # axle cornering stiffness [N/rad]
+    REAR_STIFFNESS: float = 20.0
+    FRONT_DRIVE_FRACTION: float = 0.5  # longitudinal force split, not torque control
+    SPEED_RESPONSE_TIME: float = 0.25  # closed-loop speed-setpoint response [s]
+    MAX_STEER_RATE: float = 3.14  # command slew [rad/s]
+    DYNAMIC_SUBSTEPS: int = 10  # small steps for tire/lateral dynamics
+    BLEND_LOW_SPEED: float = 0.5  # kinematic below this forward speed [m/s]
+    BLEND_HIGH_SPEED: float = 1.5  # dynamic above this speed [m/s]
+    LATERAL_RESPONSE_TIME: float = 0.1  # low-speed lateral/yaw relaxation [s]
+    MAX_SIDESLIP: float = 0.6  # bounded slip allowed, not a slip reward [rad]
+    MAX_YAW_RATE: float = 5.0  # rad/s
+    ENVELOPE_WEIGHT: float = 100.0
+    BODY_FRONT: float = 0.30  # footprint extent from COM [m]
+    BODY_REAR: float = 0.25
+    BODY_HALF_WIDTH: float = 0.15
+
+    def __post_init__(self):
+        """Reject unusable dynamic settings before tracing any rollout."""
+        import math
+
+        if self.DYNAMICS not in ('kinematic', 'dynamic'):
+            raise ValueError('dynamics must be kinematic or dynamic')
+        object.__setattr__(self, 'NX', 8 if self.DYNAMICS == 'dynamic' else 4)
+        if self.DYNAMICS == 'kinematic':
+            return
+        positive = ('MASS', 'YAW_INERTIA', 'WB', 'TIRE_MU', 'FRONT_STIFFNESS',
+                    'REAR_STIFFNESS', 'SPEED_RESPONSE_TIME', 'MAX_STEER_RATE',
+                    'BLEND_LOW_SPEED', 'LATERAL_RESPONSE_TIME', 'MAX_SIDESLIP',
+                    'MAX_YAW_RATE', 'ENVELOPE_WEIGHT', 'BODY_FRONT', 'BODY_REAR',
+                    'BODY_HALF_WIDTH', 'DT', 'MAX_SPEED')
+        if any(not math.isfinite(getattr(self, name)) or getattr(self, name) <= 0
+               for name in positive):
+            raise ValueError('dynamic model scales must be finite and positive')
+        if not 0 < self.FRONT_LENGTH < self.WB:
+            raise ValueError('front_length must lie between zero and wheelbase')
+        if not 0 <= self.FRONT_DRIVE_FRACTION <= 1:
+            raise ValueError('front_drive_fraction must lie in [0, 1]')
+        if not math.isfinite(self.BLEND_HIGH_SPEED) or self.BLEND_HIGH_SPEED <= self.BLEND_LOW_SPEED:
+            raise ValueError('blend_high_speed must exceed blend_low_speed')
+        if not isinstance(self.DYNAMIC_SUBSTEPS, int) or self.DYNAMIC_SUBSTEPS < 1:
+            raise ValueError('dynamic_substeps must be a positive integer')
+        if self.MIN_SPEED != 0 or not self.MIN_ACCEL < 0 < self.MAX_ACCEL:
+            raise ValueError('dynamic model requires forward-only speed and signed acceleration')
