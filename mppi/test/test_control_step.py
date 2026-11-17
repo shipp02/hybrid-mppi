@@ -22,7 +22,7 @@ def load_controller():
     path = SCRIPTS / 'mppi_node.py'
     tree = ast.parse(path.read_text(), filename=str(path))
     allowed = {'dataclasses', 'functools', 'typing', 'time', 'jax', 'jax.numpy',
-               'numpy', 'utils', 'occupancy_grid', 'controller_config', 'os'}
+               'numpy', 'utils', 'occupancy_grid', 'controller_config', 'dynamic_bicycle', 'os'}
     tree.body = [node for node in tree.body
                  if isinstance(node, (ast.FunctionDef, ast.ClassDef))
                  or isinstance(node, ast.ImportFrom) and node.module in allowed
@@ -118,6 +118,7 @@ class ControlStepTest(unittest.TestCase):
         node = object.__new__(controller.MPPI)
         node.control_state, node.course, node.grid, node.config = (
             self.state, self.course, self.grid, self.cfg)
+        node.tracker = None
         node.get_clock = Mock()
         node._prepare_control_observation = Mock(return_value=self.observation)
         node._visualization_due = Mock(return_value=True)
@@ -132,6 +133,7 @@ class ControlStepTest(unittest.TestCase):
         node = object.__new__(controller.MPPI)
         node.control_state, node.course, node.grid, node.config = (
             self.state, self.course, self.grid, self.cfg)
+        node.tracker = None
         node.visualize = True
         node.get_logger = Mock()
         with patch.object(controller, 'control_step', wraps=controller.control_step) as dispatch:
@@ -186,13 +188,16 @@ class LaunchDeviceTest(unittest.TestCase):
         substitutions.LaunchConfiguration = lambda name: ('configuration', name)
         ros = types.ModuleType('launch_ros.actions')
         ros.Node = lambda **kwargs: types.SimpleNamespace(**kwargs)
+        parameters = types.ModuleType('launch_ros.parameter_descriptions')
+        parameters.ParameterValue = lambda value, value_type: (value, value_type)
         namespace = {}
         path = SCRIPTS.parent / 'launch' / name
         with patch.dict(sys.modules, {
                 'launch': launch, 'launch.actions': actions,
                 'launch.substitutions': substitutions,
                 'launch_ros': types.ModuleType('launch_ros'),
-                'launch_ros.actions': ros}):
+                'launch_ros.actions': ros,
+                'launch_ros.parameter_descriptions': parameters}):
             exec(compile(path.read_text(), str(path), 'exec'), namespace)
             return namespace['generate_launch_description']()
 
@@ -203,11 +208,15 @@ class LaunchDeviceTest(unittest.TestCase):
             self.assertEqual(node.parameters[0]['odom_topic'], '/ego_racecar/odom')
 
     def test_car_requires_gpu_and_explicit_odometry(self):
-        odom, track, node = self.load_launch('car_launch.py')
-        self.assertEqual(odom[0], 'odom_topic')
-        self.assertNotIn('default_value', odom[1])
-        self.assertEqual(track[1]['default_value'], 'levine')
-        self.assertIs(node.parameters[0]['use_cpu'], False)
+        *arguments, node = self.load_launch('car_launch.py')
+        defaults = dict(arguments)
+        self.assertNotIn('default_value', defaults['odom_topic'])
+        self.assertEqual(defaults['track']['default_value'], 'levine')
+        self.assertEqual(defaults['use_cpu']['default_value'], 'false')
+        self.assertEqual(defaults['dynamics']['default_value'], 'kinematic')
+        self.assertEqual(node.parameters[0]['use_cpu'],
+                         (('configuration', 'use_cpu'), bool))
+        self.assertEqual(node.parameters[0]['dynamics'], ('configuration', 'dynamics'))
         self.assertEqual(node.parameters[0]['odom_topic'],
                          ('configuration', 'odom_topic'))
 

@@ -14,6 +14,8 @@ def generate_launch_description():
             'track', default_value='levine', description='Waypoint track name'),
         DeclareLaunchArgument(
             'tracker', default_value='none', description='none or acados'),
+        DeclareLaunchArgument(
+            'dynamics', default_value='kinematic', description='kinematic or dynamic (direct MPPI)'),
         DeclareLaunchArgument('use_cpu', default_value='false'),
         DeclareLaunchArgument('horizon', default_value='40'),
         DeclareLaunchArgument('max_speed', default_value='6.0'),
@@ -29,6 +31,7 @@ def generate_launch_description():
                 'max_speed': ParameterValue(LaunchConfiguration('max_speed'), value_type=float),
                 'visualize': False,
                 'tracker': LaunchConfiguration('tracker'),
+                'dynamics': LaunchConfiguration('dynamics'),
             }],
         ),
     ])

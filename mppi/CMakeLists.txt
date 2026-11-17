@@ -37,6 +37,7 @@ install(PROGRAMS
   scripts/mppi_node.py
   scripts/acados_tracker.py
   scripts/controller_config.py
+  scripts/dynamic_bicycle.py
   scripts/occupancy_grid.py
   scripts/utils.py
   DESTINATION lib/${PROJECT_NAME}

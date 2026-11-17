@@ -5,8 +5,12 @@ State: [COM x, COM y, body yaw, body vx, body vy, yaw rate,
 Input: [speed-setpoint slew (m/s^2), steering command (rad)].
 Steering command slew is modeled, but unmeasured servo lag is not.
 """
+import math
+
 import jax
 import jax.numpy as jnp
+
+from occupancy_grid import FREE, UNKNOWN
 
 
 def project_controls(U, x0, cfg):
@@ -106,26 +110,50 @@ def envelope_excess(X, cfg):
     return jnp.stack((slip, rate, speed, reverse), axis=-1)
 
 
-def footprint_is_free(local, grid, cfg):
-    """Check oriented footprint against inflated free cells, including grid edges.
+def footprint_cells(local, grid, cfg):
+    """Rasterize oriented rectangles using rectangle/cell separating axes."""
+    resolution = grid.spec.resolution
+    reach = math.ceil(math.hypot(max(cfg.BODY_FRONT, cfg.BODY_REAR),
+                                cfg.BODY_HALF_WIDTH) / resolution) + 1
+    offsets = jnp.arange(-reach, reach + 1)
+    dr, dc = jnp.meshgrid(offsets, offsets, indexing='ij')
+    origin_row = jnp.floor((local[:, 0] + grid.spec.middle[1]) / resolution).astype(int)
+    origin_col = jnp.floor((local[:, 1] + grid.spec.middle[0]) / resolution).astype(int)
+    row = origin_row[:, None] + dr.ravel()
+    col = origin_col[:, None] + dc.ravel()
+    forward = (row + .5) * resolution - grid.spec.middle[1]
+    left = (col + .5) * resolution - grid.spec.middle[0]
+    c, s = jnp.cos(local[:, 2:3]), jnp.sin(local[:, 2:3])
+    center_offset = (cfg.BODY_FRONT - cfg.BODY_REAR) / 2
+    half_length = (cfg.BODY_FRONT + cfg.BODY_REAR) / 2
+    dx = forward - local[:, :1] - center_offset * c
+    dy = left - local[:, 1:2] - center_offset * s
+    cell_half = resolution / 2
+    projected_cell = cell_half * (jnp.abs(c) + jnp.abs(s))
+    intersects = ((jnp.abs(c * dx + s * dy) <= half_length + projected_cell)
+                  & (jnp.abs(-s * dx + c * dy) <= cfg.BODY_HALF_WIDTH + projected_cell)
+                  & (jnp.abs(dx) <= half_length * jnp.abs(c) + cfg.BODY_HALF_WIDTH * jnp.abs(s) + cell_half)
+                  & (jnp.abs(dy) <= half_length * jnp.abs(s) + cfg.BODY_HALF_WIDTH * jnp.abs(c) + cell_half))
+    # Unknown cells overlapping present body are self-occluded, not new space.
+    # Occupied cells are NEVER cleared. No unseen clearance halo is assumed.
+    at_current_body = ((forward + cell_half >= -cfg.BODY_REAR)
+                       & (forward - cell_half <= cfg.BODY_FRONT)
+                       & (jnp.abs(left) <= cfg.BODY_HALF_WIDTH + cell_half))
+    return row, col, intersects, at_current_body
 
-    Three overlapping discs cover the configured rectangle. Occupancy inflation
-    must be at least disc radius; otherwise fail closed. No edge-cell clamping.
+
+def footprint_is_free(local, grid, cfg):
+    """Check every intersected cell, body orientation, unknown space and edges.
+
+    Uses raw occupancy, not center-point inflation. Initial self-occluded body
+    cells may be unknown; new unknown space and all occupied cells block motion.
     """
-    spacing = (cfg.BODY_FRONT + cfg.BODY_REAR) / 3
-    offsets = jnp.linspace(-cfg.BODY_REAR + spacing / 2,
-                            cfg.BODY_FRONT - spacing / 2, 3)
-    radius = jnp.sqrt(cfg.BODY_HALF_WIDTH ** 2 + (spacing / 2) ** 2)
-    c, s = jnp.cos(local[:, 2]), jnp.sin(local[:, 2])
-    centers = local[:, None, :2] + offsets[None, :, None] * jnp.stack((c, s), axis=-1)[:, None]
-    margin = radius + grid.spec.resolution  # account for cell quantization
-    forward, left = centers[..., 0], centers[..., 1]
-    in_grid = ((forward - margin >= -grid.spec.middle[1])
-               & (forward + margin < grid.spec.height - grid.spec.middle[1])
-               & (left - margin >= -grid.spec.middle[0])
-               & (left + margin < grid.spec.width - grid.spec.middle[0]))
-    free = grid.is_free(centers.reshape((-1, 2))).reshape(centers.shape[:2])
-    return jnp.all(in_grid & free, axis=1) & (grid.spec.inflation_radius >= margin)
+    row, col, intersects, at_current_body = footprint_cells(local, grid, cfg)
+    rows, cols = grid.spec.shape
+    in_grid = (row >= 0) & (row < rows) & (col >= 0) & (col < cols)
+    cells = grid.cells[jnp.clip(row, 0, rows - 1), jnp.clip(col, 0, cols - 1)]
+    known_free = (cells == FREE) | ((cells == UNKNOWN) & at_current_body)
+    return jnp.all(~intersects | (in_grid & known_free), axis=1)
 
 
 def trajectory_is_feasible(X, U, local, grid, cfg):

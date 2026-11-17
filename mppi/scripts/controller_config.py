@@ -56,6 +56,7 @@ class MPPIConfig:
     BODY_FRONT: float = 0.30  # footprint extent from COM [m]
     BODY_REAR: float = 0.25
     BODY_HALF_WIDTH: float = 0.15
+    SENSOR_TIMEOUT: float = 0.2  # dynamic mode rejects stale odometry/scans [s]
 
     def __post_init__(self):
         """Reject unusable dynamic settings before tracing any rollout."""
@@ -70,7 +71,7 @@ class MPPIConfig:
                     'REAR_STIFFNESS', 'SPEED_RESPONSE_TIME', 'MAX_STEER_RATE',
                     'BLEND_LOW_SPEED', 'LATERAL_RESPONSE_TIME', 'MAX_SIDESLIP',
                     'MAX_YAW_RATE', 'ENVELOPE_WEIGHT', 'BODY_FRONT', 'BODY_REAR',
-                    'BODY_HALF_WIDTH', 'DT', 'MAX_SPEED')
+                    'BODY_HALF_WIDTH', 'SENSOR_TIMEOUT', 'DT', 'MAX_SPEED')
         if any(not math.isfinite(getattr(self, name)) or getattr(self, name) <= 0
                for name in positive):
             raise ValueError('dynamic model scales must be finite and positive')
@@ -82,5 +83,10 @@ class MPPIConfig:
             raise ValueError('blend_high_speed must exceed blend_low_speed')
         if not isinstance(self.DYNAMIC_SUBSTEPS, int) or self.DYNAMIC_SUBSTEPS < 1:
             raise ValueError('dynamic_substeps must be a positive integer')
-        if self.MIN_SPEED != 0 or not self.MIN_ACCEL < 0 < self.MAX_ACCEL:
+        if (self.MIN_SPEED != 0 or not math.isfinite(self.MIN_ACCEL)
+                or not math.isfinite(self.MAX_ACCEL) or not self.MIN_ACCEL < 0 < self.MAX_ACCEL):
             raise ValueError('dynamic model requires forward-only speed and signed acceleration')
+        if not -math.pi / 2 < self.MIN_STEER < 0 < self.MAX_STEER < math.pi / 2:
+            raise ValueError('dynamic steering bounds must straddle zero inside (-pi/2, pi/2)')
+        if self.H < 1 or self.T < 1:
+            raise ValueError('dynamic horizon and sample count must be positive')
