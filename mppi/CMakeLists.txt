@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.5)
+cmake_minimum_required(VERSION 3.18)
 project(mppi)
 
 # Find dependencies
@@ -15,6 +15,20 @@ foreach(PACKAGE
 
 endforeach()
 
+option(MPPI_BUILD_ACADOS "Build and install checked-in acados tracker sources" OFF)
+if(MPPI_BUILD_ACADOS)
+  set(GENERATED_DIR "${CMAKE_CURRENT_SOURCE_DIR}/generated/acados_tracker"
+      CACHE PATH "Generated tracker sources")
+  if(NOT EXISTS "${GENERATED_DIR}/acados_ocp.json")
+    message(FATAL_ERROR "Generate tracker sources with tools/generate_acados_tracker.py first")
+  endif()
+  add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../tools/acados_solver"
+                   "${CMAKE_CURRENT_BINARY_DIR}/acados_tracker")
+  install(TARGETS tracker_solver LIBRARY DESTINATION lib/${PROJECT_NAME}/acados_tracker)
+  install(FILES "${GENERATED_DIR}/acados_ocp.json"
+          DESTINATION lib/${PROJECT_NAME}/acados_tracker)
+endif()
+
 # Install Python modules
 ament_python_install_package(${PROJECT_NAME})
 
@@ -22,6 +36,7 @@ ament_python_install_package(${PROJECT_NAME})
 install(PROGRAMS
   scripts/mppi_node.py
   scripts/acados_tracker.py
+  scripts/controller_config.py
   scripts/occupancy_grid.py
   scripts/utils.py
   DESTINATION lib/${PROJECT_NAME}

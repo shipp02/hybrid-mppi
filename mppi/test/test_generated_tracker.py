@@ -1,0 +1,55 @@
+"""Committed generated-solver contract; runnable without ROS, JAX, or acados."""
+import importlib.util
+import json
+from pathlib import Path
+import sys
+import unittest
+
+
+PACKAGE = Path(__file__).resolve().parents[1]
+GENERATED = PACKAGE / 'generated/acados_tracker'
+
+
+def load_defaults():
+    spec = importlib.util.spec_from_file_location(
+        '_generated_tracker_config', PACKAGE / 'scripts/controller_config.py')
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module.MPPIConfig()
+
+
+class GeneratedTrackerTest(unittest.TestCase):
+    def setUp(self):
+        self.payload = json.loads((GENERATED / 'acados_ocp.json').read_text())
+
+    def test_sources_match_formulation_name(self):
+        name = self.payload['name']
+        self.assertEqual(list(GENERATED.glob('acados_solver_*.c')),
+                         [GENERATED / f'acados_solver_{name}.c'])
+        self.assertTrue((GENERATED / f'acados_solver_{name}.h').is_file())
+        for component in ('model', 'cost', 'constraints'):
+            self.assertTrue(list(GENERATED.glob(f'*_{component}/*.c')))
+
+    def test_formulation_has_no_generator_machine_paths(self):
+        options = self.payload['code_gen_options']
+        self.assertEqual(options['code_export_directory'], '.')
+        self.assertEqual(options['json_file'], 'acados_ocp.json')
+        self.assertEqual(options['acados_lib_path'], '${ACADOS_SOURCE_DIR}/lib')
+        self.assertEqual(options['cython_include_dirs'], [])
+
+    def test_dynamics_and_limits_contract(self):
+        cfg = load_defaults()
+        options = self.payload['solver_options']
+        dims = self.payload['dims']
+        self.assertEqual(dims['nx'], cfg.NX + cfg.NU)
+        self.assertEqual(dims['nu'], cfg.NU)
+        self.assertAlmostEqual(options['tf'] / options['N_horizon'], cfg.DT)
+        self.assertEqual(self.payload['constraints']['lbu'],
+                         [cfg.MIN_ACCEL, cfg.MIN_STEER])
+        self.assertEqual(self.payload['constraints']['ubu'],
+                         [cfg.MAX_ACCEL, cfg.MAX_STEER])
+
+
+if __name__ == '__main__':
+    unittest.main()

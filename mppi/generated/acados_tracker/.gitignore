@@ -1,0 +1,8 @@
+# Keep generated C, headers, and formulation; build only through colcon.
+*.o
+*.so
+*.dylib
+*.dll
+Makefile
+CMakeLists.txt
+*.pxd

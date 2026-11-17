@@ -22,7 +22,7 @@ def load_controller():
     path = SCRIPTS / 'mppi_node.py'
     tree = ast.parse(path.read_text(), filename=str(path))
     allowed = {'dataclasses', 'functools', 'typing', 'time', 'jax', 'jax.numpy',
-               'numpy', 'utils', 'occupancy_grid', 'os'}
+               'numpy', 'utils', 'occupancy_grid', 'controller_config', 'os'}
     tree.body = [node for node in tree.body
                  if isinstance(node, (ast.FunctionDef, ast.ClassDef))
                  or isinstance(node, ast.ImportFrom) and node.module in allowed

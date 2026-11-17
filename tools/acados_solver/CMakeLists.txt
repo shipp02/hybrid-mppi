@@ -38,7 +38,8 @@ add_library(tracker_solver SHARED ${solver_sources} ${generated_functions})
 set_target_properties(tracker_solver PROPERTIES
   OUTPUT_NAME "acados_ocp_solver_${problem_name}"
   C_STANDARD 99 C_STANDARD_REQUIRED YES
-  BUILD_RPATH "${ACADOS_ROOT}/lib;${ACADOS_ROOT}/lib64")
+  BUILD_RPATH "${ACADOS_ROOT}/lib;${ACADOS_ROOT}/lib64"
+  INSTALL_RPATH "${ACADOS_ROOT}/lib;${ACADOS_ROOT}/lib64")
 target_include_directories(tracker_solver PUBLIC
   "${GENERATED_DIR}"
   "${ACADOS_INCLUDE_DIR}"
