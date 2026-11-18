@@ -11,6 +11,9 @@ import numpy as np
 import rclpy
 from ackermann_msgs.msg import AckermannDriveStamped
 from rclpy.node import Node
+from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
+from geometry_msgs.msg import Point
+from visualization_msgs.msg import Marker
 from rclpy.executors import ExternalShutdownException
 from utils import calc_interpolated_ref_trajectory_gpu, shift_sequence
 import occupancy_grid as og
@@ -525,11 +528,37 @@ class MPPI(Node):
 
         self.declare_parameter('publish_selected_paths', False)
         self.declare_parameter('path_frame', 'map')
+        self._publish_waypoints()
         self.path_publisher = (
             PathPublisherProcess(self.config.H + 1, self.get_parameter('path_frame').value)
             if self.get_parameter('publish_selected_paths').value else None)
 
         self.get_logger().info(f'MPPI initialized on {track}; waiting for LiDAR extrinsics')
+
+    def _publish_waypoints(self):
+        """Publish static course once; retain it for transient-local late subscribers."""
+        qos = QoSProfile(
+            history=HistoryPolicy.KEEP_LAST, depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        )
+        self.waypoints_publisher = self.create_publisher(Marker, '/mppi/waypoints', qos)
+        marker = Marker()
+        marker.header.frame_id = self.get_parameter('path_frame').value
+        marker.header.stamp = self.get_clock().now().to_msg()
+        marker.ns = 'waypoints'
+        marker.id = 0
+        marker.type = Marker.POINTS
+        marker.action = Marker.ADD
+        marker.pose.orientation.w = 1.0
+        marker.scale.x = 0.08
+        marker.scale.y = 0.08
+        marker.color.g = 1.0
+        marker.color.a = 1.0
+        # Default zero lifetime keeps the marker visible without refreshing it.
+        marker.points = [Point(x=float(x), y=float(y), z=0.0)
+                         for x, y in self.waypoints[:, :2]]
+        self.waypoints_publisher.publish(marker)
 
     def _create_tracker(self):
         """Optional host solver; default MPPI path needs no acados installation."""
