@@ -1,0 +1,4 @@
+mppi_node:
+  ros__parameters:
+    track: waypoints_20261026_185546.csv
+    max_speed: 2.0
