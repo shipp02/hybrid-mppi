@@ -177,7 +177,7 @@ def cost(X, U, ref, cfg, grid):
     # Distance in meters: 10 at the car, 5 at 1 m, decreasing farther ahead.
     blocked_penalty = 1e1 / (1.0 + path_dist)
     # Keep timestep costs separate: mppi_update owns horizon/cost-to-go sums.
-    obs_block_cost = jnp.where(~obs_blocked, blocked_penalty, 0.0)
+    obs_block_cost = 10 * jnp.where(~obs_blocked, blocked_penalty, 0.0)
 
     # position error in the frame of the reference: [lag, lateral]. From rest the
     # reference runs ahead of the car, and a plain x/y error is then all lag,
