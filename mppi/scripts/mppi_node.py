@@ -614,24 +614,18 @@ class MPPI(Node):
 
     def _lookup_lidar_pose(self, scan_frame, scan_stamp):
         """Return fixed car <- LiDAR [forward, left, yaw], or None if unavailable."""
-        if not self._odom_child_frame or not scan_frame:
-            self.get_logger().warning('Missing odometry child or scan frame; stopping',
-                                      throttle_duration_sec=1.0)
-            return None
-        try:
-            transform = self.tf_buffer.lookup_transform(
-                self._odom_child_frame, scan_frame, Time.from_msg(scan_stamp))
-        except TransformException as exc:
-            self.get_logger().warning(f'LiDAR extrinsics unavailable; stopping: {exc}',
-                                      throttle_duration_sec=1.0)
-            return None
-        t = transform.transform.translation
-        q = transform.transform.rotation
-        yaw = np.arctan2(
-            2.0 * (q.w * q.z + q.x * q.y),
-            1.0 - 2.0 * (q.y * q.y + q.z * q.z),
-        )
-        return (t.x, t.y, yaw)
+        # TODO: Put actual value
+        # if not self._odom_child_frame or not scan_frame:
+        #     self.get_logger().warning('Missing odometry child or scan frame; stopping',
+        #                               throttle_duration_sec=1.0)
+        #     return None
+        # t = transform.transform.translation
+        # q = transform.transform.rotation
+        # yaw = np.arctan2(
+        #     2.0 * (q.w * q.z + q.x * q.y),
+        #     1.0 - 2.0 * (q.y * q.y + q.z * q.z),
+        # )
+        return (0.0, 0.0, 0.0)
 
     def _ensure_grid(self, scan_frame, scan_stamp):
         """Cache rigid sensor geometry; resolve it again if either frame changes."""
