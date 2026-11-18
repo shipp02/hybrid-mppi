@@ -34,7 +34,7 @@ class MPPIConfig:
     MIN_ACCEL: float = -3.0  # minimum acceleration [m/ss]
     MAX_ACCEL: float = 3.0  # maximum acceleration [m/ss]
     MIN_SPEED: float = 0.0  # minimum speed [m/s]
-    MAX_SPEED: float = 6.0  # maximum speed [m/s]
+    MAX_SPEED: float = 2.0  # maximum speed [m/s]
 
     # Dynamic bicycle starting estimates, NOT identified real-car parameters.
     MASS: float = 3.5  # kg

@@ -424,6 +424,18 @@ def tracking_control_step(state, observation, course, grid, cfg):
     return result, nominal
 
 
+def calc_waypoint_yaw(x, y):
+    """Heading toward the next waypoint on a closed track, in radians."""
+    points = np.column_stack((x, y))
+    if len(points) < 2:
+        raise ValueError('At least two waypoints are required to calculate yaw')
+    # Some CSVs repeat the first point at the end of the lap.
+    repeated_endpoint = np.array_equal(points[0], points[-1])
+    track = points[:-1] if repeated_endpoint else points
+    delta = np.roll(track, -1, axis=0) - track
+    yaw = np.arctan2(delta[:, 1], delta[:, 0])
+    return np.append(yaw, yaw[0]) if repeated_endpoint else yaw
+
 class MPPI(Node):
     """
     Implement Kinematic MPPI on the car
@@ -500,7 +512,7 @@ class MPPI(Node):
             middle=(1.5, 1.0),
             resolution=0.05,
             inflation_radius=0.15,
-            num_beams=819,
+            num_beams=811,
             distance_cap=0.25,
         )
         self.grid = None
@@ -517,10 +529,16 @@ class MPPI(Node):
         self.waypoints = np.loadtxt(
             waypoint_path, delimiter=',', skiprows=1
         )
-        self.waypoints[:, 3] = np.minimum(self.waypoints[:, 3], self.config.MAX_SPEED)
+        if self.waypoints.shape[1] not in (3, 4):
+            raise ValueError('Waypoint CSV must contain x,y,vel or x,y,theta,vel')
+        yaw = calc_waypoint_yaw(self.waypoints[:, 0], self.waypoints[:, 1])
+        self.waypoints = np.column_stack((
+            self.waypoints[:, :2], yaw, self.waypoints[:, -1],
+        ))
         d = np.diff(self.waypoints[:, :2], axis=0)
         yaw = np.arctan2(d[:, 1], d[:, 0])
         yaw = np.append(yaw, yaw[-1])
+        # self.waypoints[:, 3] = np.minimum(self.waypoints[:, 3], self.config.MAX_SPEED)
         # Fixed course geometry: compute once, upload once.
         self.course = jax.device_put(np.column_stack((
             self.waypoints[:, :2], yaw, self.waypoints[:, 3],
