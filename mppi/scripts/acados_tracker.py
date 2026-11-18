@@ -49,7 +49,7 @@ def build_ocp(cfg, max_steer_rate, export_directory):
     ocp.cost.cost_type = 'NONLINEAR_LS'
     ocp.cost.cost_type_e = 'NONLINEAR_LS'
     # State order everywhere: [x, y, yaw, v]. Position weights are world-frame.
-    ocp.cost.W = np.diag([13.5, 13.5, 13.0, 5.5, 0.01, 1.0, 0.01, 100.0])
+    ocp.cost.W = np.diag([13.5, 13.5, 13.0, 5.5, 0.01, 1.0, 0.01, 10.0])
     ocp.cost.W_e = np.diag([13.5, 13.5, 13.0, 5.5])
     ocp.cost.yref = np.zeros(8)
     ocp.cost.yref_e = np.zeros(4)

@@ -24,7 +24,7 @@ class MPPIConfig:
     # cost() weights the position error along the reference (lag) and across it (lateral)
     Q: tuple = (1.0, 20.0, 2.0, 1.0)  # state error cost [lag, lateral, yaw, v]
     Qf: tuple = (2.0, 40.0, 4.0, 1.0)  # final state error cost [lag, lateral, yaw, v]
-    R: tuple = (0.01, 0.01)  # input cost [a, delta]
+    R: tuple = (0.01, 1.0)  # input cost [a, delta]
     Rd: tuple = (0.01, 1.0)  # input difference cost [a, delta]
     # ---------------------------------------------------
 
