@@ -49,6 +49,11 @@ install(DIRECTORY launch
   DESTINATION share/${PROJECT_NAME}
 )
 
+# Install car parameters from the repository-level config directory.
+install(FILES ../config/car_config.yaml
+  DESTINATION share/${PROJECT_NAME}/config
+)
+
 # Install the waypoint files, so the node finds them wherever the package is built
 install(DIRECTORY waypoints
   DESTINATION share/${PROJECT_NAME}

@@ -512,7 +512,7 @@ class MPPI(Node):
         waypoint_path = os.path.join(
             get_package_share_directory('mppi'),
             'waypoints',
-            track + '.csv'
+            track if track.endswith('.csv') else track + '.csv'
         )
         self.waypoints = np.loadtxt(
             waypoint_path, delimiter=',', skiprows=1
