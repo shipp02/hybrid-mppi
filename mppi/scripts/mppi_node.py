@@ -10,6 +10,7 @@ import jax.numpy as jnp
 import numpy as np
 import rclpy
 from ackermann_msgs.msg import AckermannDriveStamped
+from std_msgs.msg import String
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
 from geometry_msgs.msg import Point
@@ -18,6 +19,7 @@ from rclpy.executors import ExternalShutdownException
 from utils import calc_interpolated_ref_trajectory_gpu, shift_sequence
 from quintic_spline import QuinticSpline, fit_quintic_spline, sample_quintic_reference
 import occupancy_grid as og
+from planner_switch import PlannerSwitch
 import dynamic_bicycle as db
 
 import os
@@ -539,7 +541,8 @@ class MPPI(Node):
         if self.tracker_reference not in ('spline', 'nominal'):
             raise ValueError('tracker_reference must be spline or nominal')
         self.tracker = self._create_tracker()
-        self._last_tracker_action = np.zeros(2)
+        self.planner_switch = self._create_planner_switch()
+        self._last_tracker_action = np.zeros(2)  # last published [accel, steer]
         self._last_drive_command = np.zeros(2)  # [steering, speed setpoint]
 
         self.control_state = ControllerState(
@@ -562,6 +565,7 @@ class MPPI(Node):
         self.scan_subscriber = self.create_subscription(
             LaserScan, '/scan', self.scan_callback, 1,
         )
+        self.planner_publisher = self.create_publisher(String, '/mppi/planner', 10)
         self.control_timer = self.create_timer(
             self.config.DT, self.control_callback,
         )
@@ -689,6 +693,33 @@ class MPPI(Node):
             export_directory=prebuilt_directory,
             generate=False)
 
+    def _create_planner_switch(self):
+        """Which planner's command is published: fixed, or switched on speed."""
+        self.declare_parameter('planner', '')
+        self.declare_parameter('low_speed_planner', 'mpc')
+        self.declare_parameter('high_speed_planner', 'mppi')
+        # MPC tracks best from rest; it oscillates above ~4 m/s in the ST sim, MPPI does not
+        self.declare_parameter('switch_up_speed', 4.0)
+        self.declare_parameter('switch_down_speed', 3.0)
+        self.declare_parameter('switch_min_dwell', 0.5)  # seconds between switches
+        planner = self.get_parameter('planner').value or (
+            'mppi' if self.tracker is None else 'mpc')
+        if planner == 'hybrid':
+            switch = PlannerSwitch(
+                self.get_parameter('low_speed_planner').value,
+                self.get_parameter('high_speed_planner').value,
+                float(self.get_parameter('switch_up_speed').value),
+                float(self.get_parameter('switch_down_speed').value),
+                int(round(self.get_parameter('switch_min_dwell').value / self.config.DT)))
+        elif planner in ('mppi', 'mpc'):
+            switch = PlannerSwitch.fixed(planner)
+        else:
+            raise ValueError('planner must be mppi, mpc or hybrid')
+        if 'mpc' in switch.uses and self.tracker is None:
+            raise ValueError(f'planner {planner} needs tracker:=acados')
+        self.planner_mode = planner
+        return switch
+
     def _configure_device(self):
         """Select backend before allocating state; GPU requests never fall back."""
         self.declare_parameter('use_cpu', False)
@@ -800,32 +831,50 @@ class MPPI(Node):
                 export_top_paths=self.publish_top_paths_enabled)
             self._publish_control_result(result, observation, now)
         else:
-            self._track_and_publish(observation, now)
+            self._plan_and_publish(observation, now)
         self._log_control_stats(control_start)
 
-    def _track_and_publish(self, observation, now):
-        """Plan on GPU, track on CPU, then publish one command."""
+    def _plan_and_publish(self, observation, now):
+        """MPPI plans every tick; the switch picks MPPI's or the MPC's command."""
         result, nominal = tracking_control_step(
             self.control_state, observation, self.course, self.grid,
             self.config,
             export_top_paths=self.publish_top_paths_enabled)
         self.control_state, self.grid = result.state, result.grid
         self._publish_occupancy_grid(observation, now)
-        states, controls, reference = jax.device_get(
-            (nominal, result.state.U, result.reference))
-        target = reference if self.tracker_reference == 'spline' else None
-        try:
-            tracked = self.tracker.solve(
-                observation.x0, states, controls, self._last_tracker_action, target)
-        except (RuntimeError, ValueError) as exc:
-            self.get_logger().error(f'Tracker rejected command: {exc}', throttle_duration_sec=1.0)
+        plan = jax.device_get((result.action, nominal, result.state.U, result.reference))
+        planner = self._select_planner(observation)
+        action, planner = self._planner_action(planner, plan, observation.x0)
+        self.planner_publisher.publish(String(data=planner))
+        if action is None:
             self._publish_stop(now)
             return
-        self._last_tracker_action = tracked[0].copy()
-        self._publish_drive(tracked[0], observation.x0, now)
+        self._last_tracker_action = np.asarray(action, dtype=float).copy()
+        self._publish_drive(action, observation.x0, now)
         if self.publish_selected_paths_enabled:
-            self.path_publisher.history.try_record(states[:, :2], now.nanoseconds)
+            self.path_publisher.history.try_record(plan[1][:, :2], now.nanoseconds)
         self._publish_top_paths(result.top_paths, now)
+
+    def _select_planner(self, observation):
+        """Advance the speed schedule; a pose jump restarts it from low speed."""
+        if observation.reset:
+            self.planner_switch.reset()
+        return self.planner_switch.select(float(observation.x0[3]))
+
+    def _planner_action(self, planner, plan, x0):
+        """[accel, steer] of the chosen planner; hybrid falls back to MPPI."""
+        mppi_action, states, controls, reference = plan
+        if planner == 'mppi':
+            return mppi_action, planner
+        target = reference if self.tracker_reference == 'spline' else None
+        try:
+            tracked = self.tracker.solve(x0, states, controls, self._last_tracker_action, target)
+            return tracked[0], planner
+        except (RuntimeError, ValueError) as exc:
+            self.get_logger().error(f'Tracker rejected command: {exc}', throttle_duration_sec=1.0)
+        if self.planner_mode == 'hybrid':
+            return mppi_action, 'mppi'
+        return None, planner
 
     def _prepare_control_observation(self, now):
         """Validate sensors and compute host-side timing/reset policy."""
