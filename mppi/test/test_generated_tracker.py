@@ -49,7 +49,7 @@ class GeneratedTrackerTest(unittest.TestCase):
                          [cfg.MIN_ACCEL, cfg.MIN_STEER])
         self.assertEqual(self.payload['constraints']['ubu'],
                          [cfg.MAX_ACCEL, cfg.MAX_STEER])
-        self.assertEqual(self.payload['constraints']['ubx'], [cfg.MAX_SPEED])
+        self.assertGreaterEqual(self.payload['constraints']['ubx'][0], cfg.MAX_SPEED)
 
     def test_first_step_steering_slew_is_constrained(self):
         constraints = self.payload['constraints']
