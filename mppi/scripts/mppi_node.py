@@ -4,7 +4,6 @@ from controller_config import MPPIConfig
 from functools import partial
 from typing import NamedTuple
 import time
-import json
 
 import jax
 import jax.numpy as jnp
@@ -14,8 +13,7 @@ from ackermann_msgs.msg import AckermannDriveStamped
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
 from geometry_msgs.msg import Point
-from visualization_msgs.msg import Marker, MarkerArray
-from std_msgs.msg import String
+from visualization_msgs.msg import Marker
 from rclpy.executors import ExternalShutdownException
 from utils import calc_interpolated_ref_trajectory_gpu, shift_sequence
 import occupancy_grid as og
@@ -23,7 +21,7 @@ import dynamic_bicycle as db
 
 import os
 from nav_msgs.msg import Odometry
-from selected_path_publisher import PathPublisherProcess
+from selected_path_publisher import PathPublisherProcess, PUBLISH_PERIOD
 from sensor_msgs.msg import LaserScan
 from rclpy.time import Time
 from tf2_ros import Buffer, TransformListener, TransformException
@@ -219,8 +217,7 @@ def cost_components(X, U, ref, cfg, grid):
                 envelope=jnp.broadcast_to(envelope_cost, state_cost.shape))
 
 
-def cost(X, U, ref, cfg, grid):
-    parts = cost_components(X, U, ref, cfg, grid)
+def total_cost(parts):
     return (parts['tracking'] + parts['control'] + parts['control_change']
             + parts['obstacle'] + parts['envelope'])
 
@@ -229,17 +226,17 @@ class TopPaths(NamedTuple):
     xy: jax.Array
     totals: jax.Array
     components: dict
+    best_steps: dict
 
 
-def select_top_paths(X, U, C, ref, cfg, grid):
-    """Rank total costs on device; export only best 50 XY and objective sums."""
+def select_top_paths(X, C, parts):
+    """Reuse evaluated costs; select bounded diagnostics entirely on device."""
     totals = jnp.sum(C, axis=1)
     scores = jnp.where(jnp.isfinite(totals), totals, jnp.inf)
-    indices = jnp.argsort(scores, stable=True)[:min(50, cfg.T)]
-    parts = jax.vmap(cost_components, in_axes=(0, 0, None, None, None))(
-        X[indices], U[indices], ref, cfg, grid)
+    _, indices = jax.lax.top_k(-scores, min(50, X.shape[0]))
     return TopPaths(X[indices, :, :2], totals[indices],
-                    {name: jnp.sum(values, axis=1) for name, values in parts.items()})
+                    {name: jnp.sum(values[indices], axis=1) for name, values in parts.items()},
+                    {name: values[indices[0]] for name, values in parts.items()})
 
 
 def sample_controls(key, U, U_std, cfg):
@@ -313,9 +310,9 @@ def mppi_update(key, U, U_std, x0, ref, cfg, grid, *, export_top_paths=False):
     # 2. Simulate: roll out all T sequences from x0
     X_samples = rollout(x0, U_samples, cfg)
 
-    C = jax.vmap(cost, in_axes=(0, 0, None, None, None))(
-        X_samples, U_samples, ref, cfg, grid
-    )
+    parts = jax.vmap(cost_components, in_axes=(0, 0, None, None, None))(
+        X_samples, U_samples, ref, cfg, grid)
+    C = total_cost(parts)
     if cfg.DYNAMICS == 'dynamic':
         C = jnp.nan_to_num(C, nan=1e6, posinf=1e6, neginf=1e6)
     S = jnp.flip(jnp.cumsum(jnp.flip(C, axis=1), axis=1), axis=1)
@@ -346,7 +343,7 @@ def mppi_update(key, U, U_std, x0, ref, cfg, grid, *, export_top_paths=False):
 
     outputs = (U_new, U_std_new, X_samples, weights)
     if export_top_paths:
-        return (*outputs, select_top_paths(X_samples, U_samples, C, ref, cfg, grid))
+        return (*outputs, select_top_paths(X_samples, C, parts))
     return outputs
 
 
@@ -583,19 +580,19 @@ class MPPI(Node):
         )).astype(np.float32), self.device)
 
         self.declare_parameter('publish_top_paths', False)
-        self.top_paths_publisher = None
-        self.top_costs_publisher = None
-        if self.get_parameter('publish_top_paths').value:
-            self.top_paths_publisher = self.create_publisher(
-                MarkerArray, '/mppi/top_paths', 1)
-            self.top_costs_publisher = self.create_publisher(
-                String, '/mppi/top_paths/costs', 1)
+        self.publish_top_paths_enabled = self.get_parameter('publish_top_paths').value
+        self.last_debug_export = None
         self.declare_parameter('publish_selected_paths', False)
+        self.publish_selected_paths_enabled = self.get_parameter('publish_selected_paths').value
         self.declare_parameter('path_frame', 'map')
         self._publish_waypoints()
         self.path_publisher = (
-            PathPublisherProcess(self.config.H + 1, self.get_parameter('path_frame').value)
-            if self.get_parameter('publish_selected_paths').value else None)
+            PathPublisherProcess(
+                self.config.H + 1, self.get_parameter('path_frame').value,
+                publish_history=self.get_parameter('publish_selected_paths').value,
+                publish_top_paths=self.publish_top_paths_enabled)
+            if (self.get_parameter('publish_selected_paths').value
+                or self.publish_top_paths_enabled) else None)
 
         self.get_logger().info(f'MPPI initialized on {track}; waiting for LiDAR extrinsics')
 
@@ -675,12 +672,12 @@ class MPPI(Node):
         if self.tracker is None:
             result = control_step(
                 self.control_state, observation, self.course, self.grid,
-                self.config, export_path=self.path_publisher is not None,
-                export_top_paths=getattr(self, 'top_paths_publisher', None) is not None)
+                self.config, export_path=self.publish_selected_paths_enabled,
+                export_top_paths=self.publish_top_paths_enabled)
         else:
             result = tracking_control_step(
                 self.control_state, observation, self.course, self.grid, self.config,
-                export_top_paths=getattr(self, 'top_paths_publisher', None) is not None)
+                export_top_paths=self.publish_top_paths_enabled)
         jax.block_until_ready(result)
         self.get_logger().info(f'MPPI ready: {self.config}')
 
@@ -744,8 +741,8 @@ class MPPI(Node):
         if self.tracker is None:
             result = control_step(
                 self.control_state, observation, self.course, self.grid,
-                self.config, export_path=self.path_publisher is not None,
-                export_top_paths=getattr(self, 'top_paths_publisher', None) is not None)
+                self.config, export_path=self.publish_selected_paths_enabled,
+                export_top_paths=self.publish_top_paths_enabled)
             self._publish_control_result(result, observation, now)
         else:
             self._track_and_publish(observation, now)
@@ -756,8 +753,7 @@ class MPPI(Node):
         result, nominal = tracking_control_step(
             self.control_state, observation, self.course, self.grid,
             self.config,
-            export_top_paths=getattr(self, 'top_paths_publisher', None) is not None)
-        self._publish_top_paths(result.top_paths, now)
+            export_top_paths=self.publish_top_paths_enabled)
         self.control_state, self.grid = result.state, result.grid
         states, controls = jax.device_get((nominal, result.state.U))
         try:
@@ -769,8 +765,9 @@ class MPPI(Node):
             return
         self._last_tracker_action = tracked[0].copy()
         self._publish_drive(tracked[0], observation.x0, now)
-        if self.path_publisher is not None:
+        if self.publish_selected_paths_enabled:
             self.path_publisher.history.try_record(states[:, :2], now.nanoseconds)
+        self._publish_top_paths(result.top_paths, now)
 
     def _prepare_control_observation(self, now):
         """Validate sensors and compute host-side timing/reset policy."""
@@ -824,7 +821,6 @@ class MPPI(Node):
 
     def _publish_control_result(self, result, observation, now):
         """Keep persistent arrays resident; read back only publication outputs."""
-        self._publish_top_paths(result.top_paths, now)
         self.control_state = result.state
         self.grid = result.grid
         action, feasible = jax.device_get((result.action, result.feasible))
@@ -834,52 +830,20 @@ class MPPI(Node):
             self._publish_stop(now)
             return
         self._publish_drive(action, observation.x0, now)
-        if self.path_publisher is not None:
+        if self.publish_selected_paths_enabled:
             path_xy = jax.device_get(result.path_xy)
             self.path_publisher.history.try_record(path_xy, now.nanoseconds)
+        self._publish_top_paths(result.top_paths, now)
 
     def _publish_top_paths(self, top_paths, now):
-        """Read back selected diagnostics, then publish rank-matched messages."""
+        """Read back bounded diagnostics; child owns all debug ROS work."""
         if top_paths is None:
             return
-        paths = jax.device_get(top_paths)
-        self.top_paths_publisher.publish(self._top_path_markers(paths, now))
-        self.top_costs_publisher.publish(self._top_path_costs(paths, now))
-
-    def _top_path_markers(self, paths, now):
-        markers = MarkerArray()
-        for rank, xy in enumerate(paths.xy):
-            marker = Marker()
-            marker.header.frame_id = self.get_parameter('path_frame').value
-            marker.header.stamp = now.to_msg()
-            marker.ns = 'top_paths'
-            marker.id = rank
-            marker.type = Marker.LINE_STRIP
-            marker.action = Marker.ADD
-            marker.pose.orientation.w = 1.0
-            marker.scale.x = 0.025
-            marker.color.r = float(rank / max(1, len(paths.xy) - 1))
-            marker.color.g = 1.0 - marker.color.r
-            marker.color.a = 0.7
-            marker.lifetime.sec = 1
-            marker.points = [Point(x=float(x), y=float(y), z=0.05) for x, y in xy]
-            markers.markers.append(marker)
-        return markers
-
-    def _top_path_costs(self, paths, now):
-        records = []
-        for rank, total in enumerate(paths.totals):
-            record = dict(rank=rank, total=float(total),
-                          **{name: float(values[rank])
-                             for name, values in paths.components.items()})
-            # Strict JSON: non-finite diagnostics become null, not NaN literals.
-            records.append({key: value if np.isfinite(value) else None
-                            for key, value in record.items()})
-        message = String()
-        message.data = json.dumps(dict(stamp_ns=now.nanoseconds,
-                                       frame_id=self.get_parameter('path_frame').value,
-                                       paths=records), allow_nan=False)
-        return message
+        current = time.monotonic()
+        if self.last_debug_export is not None and current - self.last_debug_export < PUBLISH_PERIOD:
+            return
+        self.last_debug_export = current
+        self.path_publisher.top_paths.try_record(jax.device_get(top_paths), now.nanoseconds)
 
     def _publish_drive(self, action, x0, now):
         drive_msg = AckermannDriveStamped()
@@ -927,7 +891,8 @@ class MPPI(Node):
             f'{np.percentile(latency_ms, 95):.2f}/{latency_ms.max():.2f}, '
             f'period ms mean/p95/max={period_stats}, '
             f'latency > {self.config.DT * 1e3:.1f} ms: {overruns}/{latency_ms.size}, '
-            f'publish_selected_paths={self.path_publisher is not None}'
+            f'publish_selected_paths={self.publish_selected_paths_enabled}, '
+            f'publish_top_paths={self.publish_top_paths_enabled}'
         )
         self._control_latencies.clear()
         self._control_periods.clear()
