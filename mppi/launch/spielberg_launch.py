@@ -19,6 +19,9 @@ PARAMETERS = {
     'track': 'spielberg',
     'use_cpu': True,
     'odom_topic': '/ego_racecar/odom',
+    # acados MPC tracks the quintic spline reference (needs -DMPPI_BUILD_ACADOS=ON)
+    'tracker': 'acados',
+    'tracker_reference': 'spline',
 }
 
 

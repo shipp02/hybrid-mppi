@@ -19,7 +19,10 @@ PARAMETERS = {
     'track': 'levine',
     'use_cpu': True,
     'odom_topic' : '/ego_racecar/odom',
-    'publish_selected_paths': False
+    'publish_selected_paths': False,
+    # acados MPC tracks the quintic spline reference (needs -DMPPI_BUILD_ACADOS=ON)
+    'tracker': 'acados',
+    'tracker_reference': 'spline',
 }
 
 
