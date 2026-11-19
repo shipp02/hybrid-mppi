@@ -43,6 +43,7 @@ install(PROGRAMS
   scripts/map_obstacles.py
   scripts/map_obstacle_debug.py
   scripts/utils.py
+  scripts/quintic_spline.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

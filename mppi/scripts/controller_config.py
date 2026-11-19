@@ -16,6 +16,7 @@ class MPPIConfig:
     COV_UPDATE: bool = True  # bonus: adapt the sampling std of each step
     STEER_BIAS: float = 0.15  # left/right proposal steering pulse [rad]
     BIAS_DURATION: float = 0.3  # pulse duration, then resume nominal steering [s]
+    REFERENCE: str = "quintic"  # "quintic" spline or "linear" waypoint interpolation
 
     # ---------------------------------------------------
     # TODO: you may need to tune the following parameters
@@ -103,6 +104,8 @@ class MPPIConfig:
                 raise ValueError('steering_delay_s requires kinematic MPPI')
             if self.STEERING_DELAY_S >= self.H * self.DT or self.steering_delay_steps >= self.H:
                 raise ValueError('steering delay must be shorter than the rollout horizon')
+        if self.REFERENCE not in ('quintic', 'linear'):
+            raise ValueError('reference must be quintic or linear')
         object.__setattr__(self, 'NX', 8 if self.DYNAMICS == 'dynamic' else 4)
         if self.DYNAMICS == 'kinematic':
             return

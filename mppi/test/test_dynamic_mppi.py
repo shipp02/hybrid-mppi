@@ -13,7 +13,8 @@ from test_control_step import controller as c
 
 class DynamicMPPItest(unittest.TestCase):
     def setUp(self):
-        self.cfg = c.MPPIConfig(DYNAMICS='dynamic', H=6, T=16, MAX_SPEED=4.)
+        self.cfg = c.MPPIConfig(DYNAMICS='dynamic', H=6, T=16, MAX_SPEED=4.,
+                                  REFERENCE='linear')  # open straight course
         grid = c.og.OccupancyGrid.create(
             width=6., height=8., middle=(3., 2.), resolution=.1,
             inflation_radius=.3, distance_cap=.4, num_beams=21)
@@ -23,7 +24,7 @@ class DynamicMPPItest(unittest.TestCase):
         self.U = jnp.zeros((self.cfg.H, 2))
         self.X = c.simulate(self.x0, self.U, self.cfg)
         x = jnp.linspace(0., 10., 101)
-        self.course = jnp.stack((x, x * 0, x * 0, x * 0 + 2), axis=1)
+        self.course = c.make_course(np.stack((x, x * 0, x * 0, x * 0 + 2), axis=1))
         self.state = c.ControllerState(jax.random.PRNGKey(7), self.U,
             jnp.broadcast_to(jnp.array(self.cfg.U_STD), self.U.shape))
         self.obs = c.ControlObservation(self.x0, jnp.full((21,), 20.),

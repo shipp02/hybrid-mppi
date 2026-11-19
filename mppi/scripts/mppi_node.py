@@ -18,6 +18,7 @@ from visualization_msgs.msg import Marker
 from rclpy.executors import ExternalShutdownException
 from std_msgs.msg import Float32
 from utils import calc_interpolated_ref_trajectory_gpu, shift_sequence
+from quintic_spline import QuinticSpline, fit_quintic_spline, sample_quintic_reference
 import occupancy_grid as og
 import dynamic_bicycle as db
 
@@ -572,6 +573,18 @@ class ControlResult(NamedTuple):
     feasible: jax.Array = True
     top_paths: TopPaths | None = None
     selection_metrics: jax.Array | None = None
+    reference: jax.Array | None = None
+
+
+class Course(NamedTuple):
+    waypoints: jax.Array  # (N, 4) [x, y, yaw, v] for linear interpolation
+    spline: QuinticSpline
+
+
+def make_course(waypoints):
+    """Host-side: pair the raw waypoints with their closed quintic spline."""
+    waypoints = np.asarray(waypoints, dtype=np.float32)
+    return Course(waypoints, fit_quintic_spline(waypoints))
 
 
 def prepare_warm_start(state, observation, cfg):
@@ -590,11 +603,13 @@ def prepare_warm_start(state, observation, cfg):
 
 def build_reference(x0, course, cfg):
     """Build a speed-ramped world-frame reference from the current pose."""
-    cx, cy, cyaw, cv = course.T
+    v0 = jnp.hypot(x0[3], x0[4]) if cfg.DYNAMICS == 'dynamic' else x0[3]
+    if cfg.REFERENCE == 'quintic':
+        return sample_quintic_reference(
+            x0[0], x0[1], course.spline, cfg.DT, cfg.H, v0=v0, max_accel=cfg.MAX_ACCEL)
+    cx, cy, cyaw, cv = course.waypoints.T
     return calc_interpolated_ref_trajectory_gpu(
-        x0[0], x0[1], cx, cy, cyaw, cv, cfg.DT, cfg.H,
-        v0=jnp.hypot(x0[3], x0[4]) if cfg.DYNAMICS == 'dynamic' else x0[3],
-        max_accel=cfg.MAX_ACCEL)
+        x0[0], x0[1], cx, cy, cyaw, cv, cfg.DT, cfg.H, v0=v0, max_accel=cfg.MAX_ACCEL)
 
 
 def optimize_controls(state, observation, reference, grid, cfg, export_top_paths=False):
@@ -610,7 +625,7 @@ def optimize_controls(state, observation, reference, grid, cfg, export_top_paths
         ControllerState(key, U, U_std), samples, weights, top_paths, selection)
 
 
-def select_control_outputs(solution, observation, grid, cfg, export_path):
+def select_control_outputs(solution, observation, reference, grid, cfg, export_path):
     """Export only selected XY, reusing the nominal required by dynamic checks."""
     path_xy = None
     feasible = jnp.bool_(True)
@@ -622,7 +637,7 @@ def select_control_outputs(solution, observation, grid, cfg, export_path):
             path_xy = nominal[:, :2]
     return ControlResult(
         solution.state, grid, solution.state.U[0], path_xy, feasible, solution.top_paths,
-        solution.selection_metrics)
+        solution.selection_metrics, reference)
 
 
 @partial(jax.jit, static_argnames=("cfg", "export_path", "export_top_paths"))
@@ -635,7 +650,7 @@ def control_step(state, observation, course, grid, cfg, *, export_path=False,
         pose=observation.x0[:3], reset=observation.reset)
     reference = build_reference(observation.x0, course, cfg)
     solution = optimize_controls(state, observation, reference, grid, cfg, export_top_paths)
-    return select_control_outputs(solution, observation, grid, cfg, export_path)
+    return select_control_outputs(solution, observation, reference, grid, cfg, export_path)
 
 
 @partial(jax.jit, static_argnames=("cfg", "export_top_paths"))
@@ -790,6 +805,12 @@ class MPPI(Node):
         self._steering_history = SentSteeringHistory(delay_steps, self.config.DT)
         self.get_logger().info(
             f'Steering delay: {delay_steps * self.config.DT:.3f} s ({delay_steps} rollout steps)')
+
+        # MPC target: 'spline' tracks the sampled reference, 'nominal' the MPPI plan
+        self.declare_parameter('tracker_reference', 'spline')
+        self.tracker_reference = self.get_parameter('tracker_reference').value
+        if self.tracker_reference not in ('spline', 'nominal'):
+            raise ValueError('tracker_reference must be spline or nominal')
         self.tracker = self._create_tracker()
         self._last_tracker_action = np.zeros(2)
         self._last_drive_command = np.zeros(2)  # [steering, speed setpoint]
@@ -868,11 +889,12 @@ class MPPI(Node):
         d = np.diff(self.waypoints[:, :2], axis=0)
         yaw = np.arctan2(d[:, 1], d[:, 0])
         yaw = np.append(yaw, yaw[-1])
-        # self.waypoints[:, 3] = np.minimum(self.waypoints[:, 3], self.config.MAX_SPEED)
-        # Fixed course geometry: compute once, upload once.
-        self.course = jax.device_put(np.column_stack((
+        # reference must not outrun the car, or the x/y targets run ahead and cut corners
+        self.waypoints[:, 3] = np.minimum(self.waypoints[:, 3], self.config.MAX_SPEED)
+        # Fixed course geometry: fit the spline once, upload once.
+        self.course = jax.device_put(make_course(np.column_stack((
             self.waypoints[:, :2], yaw, self.waypoints[:, 3],
-        )).astype(np.float32), self.device)
+        ))), self.device)
 
         self.declare_parameter('publish_top_paths', False)
         self.publish_top_paths_enabled = self.get_parameter('publish_top_paths').value
@@ -1118,10 +1140,12 @@ class MPPI(Node):
             export_top_paths=self.publish_top_paths_enabled)
         self.control_state, self.grid = result.state, result.grid
         self._publish_occupancy_grid(observation, now)
-        states, controls = jax.device_get((nominal, result.state.U))
+        states, controls, reference = jax.device_get(
+            (nominal, result.state.U, result.reference))
+        target = reference if self.tracker_reference == 'spline' else None
         try:
             tracked = self.tracker.solve(
-                observation.x0, states, controls, self._last_tracker_action)
+                observation.x0, states, controls, self._last_tracker_action, target)
         except (RuntimeError, ValueError) as exc:
             self.get_logger().error(f'Tracker rejected command: {exc}', throttle_duration_sec=1.0)
             self._publish_stop(now)
