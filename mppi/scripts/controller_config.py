@@ -14,6 +14,9 @@ class MPPIConfig:
     SAMPLING: str = "uniform"  # "clip", or bonus: "truncated" (normal) or "uniform"
     COV_UPDATE: bool = True  # bonus: adapt the sampling std of each step
     REFERENCE: str = "quintic"  # "quintic" spline or "linear" waypoint interpolation
+    # speed setpoint = v + a * lead; a P speed loop needs lead ~ 1/gain to realize a
+    SPEED_LEAD_TIME: float = 0.05  # when accelerating
+    BRAKE_LEAD_TIME: float = 0.05  # when braking (speed loops often brake harder)
 
     # ---------------------------------------------------
     # TODO: you may need to tune the following parameters
@@ -27,6 +30,7 @@ class MPPIConfig:
     Qf: tuple = (2.0, 40.0, 4.0, 1.0)  # final state error cost [lag, lateral, yaw, v]
     R: tuple = (0.01, 1.0)  # input cost [a, delta]
     Rd: tuple = (0.01, 1.0)  # input difference cost [a, delta]
+    OBSTACLE_WEIGHT: float = 10.0  # scale of the blocked-cell penalty
     # ---------------------------------------------------
 
     WB: float = 0.33  # Wheelbase [m]
