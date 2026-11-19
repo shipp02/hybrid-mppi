@@ -36,6 +36,8 @@ def build_ocp(cfg, max_steer_rate, export_directory):
         model.x[:4], model.u, model.u - model.x[4:])
     model.cost_y_expr_e = model.x[:4]
     model.con_h_expr = model.u[1] - model.x[5]
+    # acados skips con_h_expr at stage 0, so slew from the last command needs its own
+    model.con_h_expr_0 = model.u[1] - model.x[5]
 
     ocp = AcadosOcp()
     ocp.model = model
@@ -65,6 +67,8 @@ def build_ocp(cfg, max_steer_rate, export_directory):
     ocp.constraints.ubx_e = np.array([cfg.MAX_SPEED])
     ocp.constraints.lh = np.array([-max_steer_rate * cfg.DT])
     ocp.constraints.uh = np.array([max_steer_rate * cfg.DT])
+    ocp.constraints.lh_0 = ocp.constraints.lh
+    ocp.constraints.uh_0 = ocp.constraints.uh
     ocp.code_export_directory = str(Path(export_directory).resolve())
     return ocp
 
@@ -140,7 +144,7 @@ class AcadosTracker:
                 or not np.isclose(ocp.solver_options.tf, self.cfg.H * self.cfg.DT)
                 or ocp.model.x.numel() != 6 or ocp.model.u.numel() != 2):
             raise ValueError('Prebuilt solver horizon, timestep or dimensions do not match')
-        for field in ('lbu', 'ubu', 'lh', 'uh', 'lbx', 'ubx', 'lbx_e', 'ubx_e'):
+        for field in ('lbu', 'ubu', 'lh', 'uh', 'lh_0', 'uh_0', 'lbx', 'ubx', 'lbx_e', 'ubx_e'):
             if not np.allclose(getattr(ocp.constraints, field),
                                getattr(expected.constraints, field)):
                 raise ValueError(f'Prebuilt solver limits do not match: {field}')
