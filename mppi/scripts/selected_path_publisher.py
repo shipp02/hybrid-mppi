@@ -246,7 +246,78 @@ class TopPathPublication:
         self.costs.publish(message)
 
 
-def run_publisher(history, stop, frame, top_paths=None, publish_history=True):
+class SharedOccupancyGrid:
+    """Latest-only raw cells and matching world pose; writers never wait."""
+
+    def __init__(self, context, settings):
+        self.resolution = settings['resolution']
+        self.middle = settings['middle']
+        self.shape = (int(np.ceil(settings['height'] / self.resolution)),
+                      int(np.ceil(settings['width'] / self.resolution)))
+        self._cells = context.RawArray('B', int(np.prod(self.shape)))
+        self._pose = context.RawArray('d', 3)
+        self._stamp = context.RawValue('q', 0)
+        self._sequence = context.RawValue('Q', 0)
+        self._lock = context.Lock()
+
+    def try_record(self, cells, pose, stamp_ns):
+        if cells.shape != self.shape or not self._lock.acquire(False):
+            return False
+        try:
+            np.frombuffer(self._cells, dtype=np.uint8)[:] = cells.ravel()
+            np.frombuffer(self._pose, dtype=np.float64)[:] = pose[:3]
+            self._stamp.value = stamp_ns
+            self._sequence.value += 1
+        finally:
+            self._lock.release()
+        return True
+
+    def snapshot(self):
+        with self._lock:
+            return (np.frombuffer(self._cells, dtype=np.uint8).copy().reshape(self.shape),
+                    np.frombuffer(self._pose, dtype=np.float64).copy(),
+                    self._stamp.value, self._sequence.value)
+
+
+def build_occupancy_grid(cells, pose, stamp, shared, frame):
+    """Transpose [forward, left] into ROS [y, x]; place origin in world frame."""
+    from nav_msgs.msg import OccupancyGrid
+
+    x, y, yaw = pose
+    forward, left = -shared.middle[1], -shared.middle[0]
+    message = OccupancyGrid()
+    message.header.frame_id = frame
+    message.header.stamp.sec = int(stamp) // 1_000_000_000
+    message.header.stamp.nanosec = int(stamp) % 1_000_000_000
+    message.info.resolution = shared.resolution
+    message.info.width, message.info.height = cells.shape
+    message.info.origin.position.x = float(x + np.cos(yaw) * forward - np.sin(yaw) * left)
+    message.info.origin.position.y = float(y + np.sin(yaw) * forward + np.cos(yaw) * left)
+    message.info.origin.orientation.z = float(np.sin(yaw / 2))
+    message.info.origin.orientation.w = float(np.cos(yaw / 2))
+    # Controller cell codes: UNKNOWN=1, FREE=2, OCCUPIED=3.
+    message.data = np.array([-1, -1, 0, 100], dtype=np.int8)[cells.T].ravel().tolist()
+    return message
+
+
+class OccupancyGridPublication:
+    def __init__(self, node, shared, frame):
+        from nav_msgs.msg import OccupancyGrid
+
+        self.shared, self.frame = shared, frame
+        self.sequence = 0
+        self.publisher = node.create_publisher(OccupancyGrid, '/mppi/occupancy_grid', publisher_qos())
+        self.timer = node.create_timer(PUBLISH_PERIOD, self.publish)
+
+    def publish(self):
+        cells, pose, stamp, sequence = self.shared.snapshot()
+        if sequence == self.sequence:
+            return
+        self.sequence = sequence
+        self.publisher.publish(build_occupancy_grid(cells, pose, stamp, self.shared, self.frame))
+
+
+def run_publisher(history, stop, frame, top_paths=None, publish_history=True, occupancy_grid=None):
     """Spawn entry point: independent ROS node, no inherited CUDA context."""
     import rclpy
     from rclpy.node import Node
@@ -256,6 +327,7 @@ def run_publisher(history, stop, frame, top_paths=None, publish_history=True):
     node = Node('mppi_selected_path_publisher')
     publication = HistoryPublication(node, history, frame) if publish_history else None
     top_publication = TopPathPublication(node, top_paths, frame) if top_paths is not None else None
+    grid_publication = OccupancyGridPublication(node, occupancy_grid, frame) if occupancy_grid is not None else None
     try:
         while not stop.is_set() and rclpy.ok():
             rclpy.spin_once(node, timeout_sec=.1)
@@ -269,13 +341,16 @@ def run_publisher(history, stop, frame, top_paths=None, publish_history=True):
 class PathPublisherProcess:
     """Own spawned process and bounded shared history; call close on node shutdown."""
 
-    def __init__(self, points, frame='map', *, publish_history=True, publish_top_paths=False):
+    def __init__(self, points, frame='map', *, publish_history=True, publish_top_paths=False,
+                 grid_settings=None):
         context = mp.get_context('spawn')
         self.history = SharedPathHistory(context, points)
         self.top_paths = SharedTopPaths(context, points) if publish_top_paths else None
+        self.occupancy_grid = SharedOccupancyGrid(context, grid_settings) if grid_settings is not None else None
         self._stop = context.Event()
         self._process = context.Process(target=run_publisher,
-            args=(self.history, self._stop, frame, self.top_paths, publish_history), daemon=True)
+            args=(self.history, self._stop, frame, self.top_paths, publish_history,
+                  self.occupancy_grid), daemon=True)
         self._process.start()
 
     def close(self):

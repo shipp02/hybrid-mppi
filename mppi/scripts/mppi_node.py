@@ -582,6 +582,9 @@ class MPPI(Node):
         self.declare_parameter('publish_top_paths', False)
         self.publish_top_paths_enabled = self.get_parameter('publish_top_paths').value
         self.last_debug_export = None
+        self.declare_parameter('publish_occupancy_grid', False)
+        self.publish_occupancy_grid_enabled = self.get_parameter('publish_occupancy_grid').value
+        self.last_grid_export = None
         self.declare_parameter('publish_selected_paths', False)
         self.publish_selected_paths_enabled = self.get_parameter('publish_selected_paths').value
         self.declare_parameter('path_frame', 'map')
@@ -589,10 +592,11 @@ class MPPI(Node):
         self.path_publisher = (
             PathPublisherProcess(
                 self.config.H + 1, self.get_parameter('path_frame').value,
-                publish_history=self.get_parameter('publish_selected_paths').value,
-                publish_top_paths=self.publish_top_paths_enabled)
-            if (self.get_parameter('publish_selected_paths').value
-                or self.publish_top_paths_enabled) else None)
+                publish_history=self.publish_selected_paths_enabled,
+                publish_top_paths=self.publish_top_paths_enabled,
+                grid_settings=self._grid_settings if self.publish_occupancy_grid_enabled else None)
+            if (self.publish_selected_paths_enabled or self.publish_top_paths_enabled
+                or self.publish_occupancy_grid_enabled) else None)
 
         self.get_logger().info(f'MPPI initialized on {track}; waiting for LiDAR extrinsics')
 
@@ -755,6 +759,7 @@ class MPPI(Node):
             self.config,
             export_top_paths=self.publish_top_paths_enabled)
         self.control_state, self.grid = result.state, result.grid
+        self._publish_occupancy_grid(observation, now)
         states, controls = jax.device_get((nominal, result.state.U))
         try:
             tracked = self.tracker.solve(
@@ -823,6 +828,7 @@ class MPPI(Node):
         """Keep persistent arrays resident; read back only publication outputs."""
         self.control_state = result.state
         self.grid = result.grid
+        self._publish_occupancy_grid(observation, now)
         action, feasible = jax.device_get((result.action, result.feasible))
         if not feasible:
             self.get_logger().warning(
@@ -834,6 +840,17 @@ class MPPI(Node):
             path_xy = jax.device_get(result.path_xy)
             self.path_publisher.history.try_record(path_xy, now.nanoseconds)
         self._publish_top_paths(result.top_paths, now)
+
+    def _publish_occupancy_grid(self, observation, now):
+        """Export only raw cells at debug rate; child builds the ROS message."""
+        if not self.publish_occupancy_grid_enabled:
+            return
+        current = time.monotonic()
+        if self.last_grid_export is not None and current - self.last_grid_export < PUBLISH_PERIOD:
+            return
+        self.last_grid_export = current
+        self.path_publisher.occupancy_grid.try_record(
+            jax.device_get(self.grid.cells), observation.x0, now.nanoseconds)
 
     def _publish_top_paths(self, top_paths, now):
         """Read back bounded diagnostics; child owns all debug ROS work."""
