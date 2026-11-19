@@ -179,7 +179,7 @@ def cost_components(X, U, ref, cfg, grid):
     # Distance in meters: 10 at the car, 5 at 1 m, decreasing farther ahead.
     blocked_penalty = 1e1 / (1.0 + path_dist)
     # Keep timestep costs separate: mppi_update owns horizon/cost-to-go sums.
-    obs_block_cost = 10 * jnp.where(~obs_blocked, blocked_penalty, 0.0)
+    obs_block_cost = cfg.OBSTACLE_WEIGHT * jnp.where(~obs_blocked, blocked_penalty, 0.0)
 
     # position error in the frame of the reference: [lag, lateral]. From rest the
     # reference runs ahead of the car, and a plain x/y error is then all lag,
@@ -476,6 +476,19 @@ def tracking_control_step(state, observation, course, grid, cfg, *, export_top_p
     return result, nominal
 
 
+def speed_setpoint(x0, action, cfg):
+    """Published speed: current speed plus planned accel over the lead time.
+
+    Dynamic rollouts model the command itself (x0[7]), so they keep one DT.
+    """
+    if cfg.DYNAMICS == 'dynamic':
+        target = x0[7] + float(action[0]) * cfg.DT
+    else:
+        lead = cfg.SPEED_LEAD_TIME if action[0] > 0 else cfg.BRAKE_LEAD_TIME
+        target = x0[3] + float(action[0]) * lead
+    return float(np.clip(target, cfg.MIN_SPEED, cfg.MAX_SPEED))
+
+
 def calc_waypoint_yaw(x, y):
     """Heading toward the next waypoint on a closed track, in radians."""
     points = np.column_stack((x, y))
@@ -503,6 +516,7 @@ class MPPI(Node):
         
         overrides = {}
         for field in ('MAX_SPEED', 'LAMBDA', 'INTEGRATOR', 'SAMPLING', 'COV_UPDATE', 'REFERENCE',
+                      'SPEED_LEAD_TIME', 'BRAKE_LEAD_TIME', 'OBSTACLE_WEIGHT', 'U_STD', 'U_STD_MIN',
                       'DYNAMICS', 'MASS', 'YAW_INERTIA', 'WB', 'FRONT_LENGTH', 'TIRE_MU',
                       'FRONT_STIFFNESS', 'REAR_STIFFNESS', 'FRONT_DRIVE_FRACTION',
                       'SPEED_RESPONSE_TIME', 'MAX_STEER_RATE', 'DYNAMIC_SUBSTEPS',
@@ -562,14 +576,17 @@ class MPPI(Node):
         self._last_control_start = None
         self._stats_window_start = None
 
+        # LiDAR ahead of the odometry point; car odom is at the COM, sim odom at base_link
+        self.declare_parameter('lidar_offset', 0.1016)
+        # local grid reach ahead of the car; rollouts past it see the edge cells
+        self.declare_parameter('grid_forward', 6.0)
         # Geometry is initialized after the fixed LiDAR pose becomes available.
         self._grid_settings = dict(
             width=3.0,
-            height=7.0,
+            height=float(self.get_parameter('grid_forward').value) + 1.0,
             middle=(1.5, 1.0),
             resolution=0.05,
             inflation_radius=0.15,
-            num_beams=811,
             distance_cap=0.25,
         )
         self.grid = None
@@ -732,16 +749,26 @@ class MPPI(Node):
         )
 
     def _lookup_lidar_pose(self, scan_frame, scan_stamp):
-        """Return fixed hardware LiDAR pose [forward metres, left metres, yaw].
+        """Return fixed LiDAR pose [forward metres, left metres, yaw].
 
-        Assumes COM-based odometry and a centered, forward-facing sensor.
-        LiDAR is 10.5 inches and estimated COM is 6.5 inches from rear axle.
+        Assumes a centered, forward-facing sensor `lidar_offset` ahead of the
+        odometry point. Default: car LiDAR is 10.5 in and COM 6.5 in from the
+        rear axle, so 4 in ahead of COM odometry.
         """
-        return (0.1016, 0.0, 0.0)  # 4 inches forward of COM
+        return (float(self.get_parameter('lidar_offset').value), 0.0, 0.0)
 
-    def _ensure_grid(self, scan_frame, scan_stamp):
-        """Cache rigid sensor geometry; resolve it again if either frame changes."""
-        frames = (self._odom_child_frame, scan_frame)
+    @staticmethod
+    def _scan_geometry(scan):
+        """Beam count and angular span of a cached scan."""
+        ranges, angle_min, angle_increment = scan[:3]
+        return dict(num_beams=len(ranges), angle_min=angle_min,
+                    angle_max=angle_min + angle_increment * (len(ranges) - 1))
+
+    def _ensure_grid(self, scan):
+        """Cache rigid sensor geometry; rebuild if a frame or the beam layout changes."""
+        scan_frame, scan_stamp = scan[5], scan[6]
+        geometry = self._scan_geometry(scan)
+        frames = (self._odom_child_frame, scan_frame, tuple(geometry.values()))
         if self._grid_frames == frames:
             return True
         lidar_pose = self._lookup_lidar_pose(scan_frame, scan_stamp)
@@ -749,7 +776,8 @@ class MPPI(Node):
             return False
         # Do not leave a previous drive command active during JAX compilation.
         self._publish_stop(self.get_clock().now())
-        self.grid = og.OccupancyGrid.create(lidar_pose=lidar_pose, **self._grid_settings)
+        self.grid = og.OccupancyGrid.create(
+            lidar_pose=lidar_pose, **self._grid_settings, **geometry)
         self._warm_up()
         # Compilation pauses are not steady-state control-loop measurements.
         self._control_latencies.clear()
@@ -823,7 +851,7 @@ class MPPI(Node):
             return
 
         ranges, angle_min, angle_increment, range_min, range_max, scan_frame, scan_stamp = scan
-        if not self._ensure_grid(scan_frame, scan_stamp):
+        if not self._ensure_grid(scan):
             self._publish_stop(now)
             return
 
@@ -893,14 +921,7 @@ class MPPI(Node):
         drive_msg.header.stamp = now.to_msg()
         drive_msg.drive.steering_angle = float(action[1])
 
-        previous_speed = x0[7] if self.config.DYNAMICS == 'dynamic' else x0[3]
-        target_speed = previous_speed + float(action[0]) * self.config.DT
-        target_speed = np.clip(
-            target_speed,
-            self.config.MIN_SPEED,
-            self.config.MAX_SPEED,
-        )
-
+        target_speed = speed_setpoint(x0, action, self.config)
         drive_msg.drive.speed = float(target_speed)
         self._last_drive_command = np.array([float(action[1]), float(target_speed)])
         self.drive_publisher.publish(drive_msg)
