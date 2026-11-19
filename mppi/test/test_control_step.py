@@ -206,6 +206,10 @@ class LaunchDeviceTest(unittest.TestCase):
             self.assertEqual(node.parameters[0]['odom_topic'], '/ego_racecar/odom')
             self.assertEqual(node.parameters[0]['tracker'], 'acados')
             self.assertEqual(node.parameters[0]['tracker_reference'], 'spline')
+            self.assertEqual(node.parameters[0]['planner'], 'hybrid')
+            self.assertEqual(node.parameters[0]['lidar_offset'], 0.275)
+            self.assertEqual(node.parameters[0]['lambda'], 0.03)
+            self.assertEqual(node.parameters[0]['u_std'], [1.5, 0.05])
 
     def test_car_requires_gpu_and_explicit_odometry(self):
         *arguments, node = self.load_launch('car_launch.py')
