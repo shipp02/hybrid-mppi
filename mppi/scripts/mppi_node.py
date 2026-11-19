@@ -708,19 +708,12 @@ class MPPI(Node):
         )
 
     def _lookup_lidar_pose(self, scan_frame, scan_stamp):
-        """Return fixed car <- LiDAR [forward, left, yaw], or None if unavailable."""
-        # TODO: Put actual value
-        # if not self._odom_child_frame or not scan_frame:
-        #     self.get_logger().warning('Missing odometry child or scan frame; stopping',
-        #                               throttle_duration_sec=1.0)
-        #     return None
-        # t = transform.transform.translation
-        # q = transform.transform.rotation
-        # yaw = np.arctan2(
-        #     2.0 * (q.w * q.z + q.x * q.y),
-        #     1.0 - 2.0 * (q.y * q.y + q.z * q.z),
-        # )
-        return (0.0, 0.0, 0.0)
+        """Return fixed hardware LiDAR pose [forward metres, left metres, yaw].
+
+        Assumes COM-based odometry and a centered, forward-facing sensor.
+        LiDAR is 10.5 inches and estimated COM is 6.5 inches from rear axle.
+        """
+        return (0.1016, 0.0, 0.0)  # 4 inches forward of COM
 
     def _ensure_grid(self, scan_frame, scan_stamp):
         """Cache rigid sensor geometry; resolve it again if either frame changes."""
