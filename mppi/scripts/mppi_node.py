@@ -197,7 +197,7 @@ def cost_components(X, U, ref, cfg, grid):
     clearance = grid.clearance(local_traj)
     depth = jnp.maximum(grid.spec.inflation_radius - clearance, 0.0)
     # Keep timestep costs separate: mppi_update owns horizon/cost-to-go sums.
-    obs_block_cost = 10 * jnp.where(~obs_blocked, blocked_penalty * (1.0 + 20.0 * depth), 0.0)
+    obs_block_cost = cfg.OBSTACLE_WEIGHT * jnp.where(~obs_blocked, blocked_penalty * (1.0 + 20.0 * depth), 0.0)
     # Soft push away from obstacles and walls closer than distance_cap: 0 beyond it,
     # CLEARANCE_WEIGHT at the inflated edge. Between an obstacle and a wall the
     # pushes from both sides balance in the middle of the gap.
@@ -206,6 +206,7 @@ def cost_components(X, U, ref, cfg, grid):
                         / (spec.distance_cap - spec.inflation_radius), 0.0, 1.0)
     clearance_cost = cfg.CLEARANCE_WEIGHT * nearness ** 2
     # obs_block_cost = 0.0
+
 
     # position error in the frame of the reference: [lag, lateral]. From rest the
     # reference runs ahead of the car, and a plain x/y error is then all lag,
@@ -662,6 +663,19 @@ def tracking_control_step(state, observation, course, grid, cfg, *, export_top_p
     return result, nominal
 
 
+def speed_setpoint(x0, action, cfg):
+    """Published speed: current speed plus planned accel over the lead time.
+
+    Dynamic rollouts model the command itself (x0[7]), so they keep one DT.
+    """
+    if cfg.DYNAMICS == 'dynamic':
+        target = x0[7] + float(action[0]) * cfg.DT
+    else:
+        lead = cfg.SPEED_LEAD_TIME if action[0] > 0 else cfg.BRAKE_LEAD_TIME
+        target = x0[3] + float(action[0]) * lead
+    return float(np.clip(target, cfg.MIN_SPEED, cfg.MAX_SPEED))
+
+
 def calc_waypoint_yaw(x, y):
     """Heading toward the next waypoint on a closed track, in radians."""
     points = np.column_stack((x, y))
@@ -851,6 +865,8 @@ class MPPI(Node):
         self._last_control_start = None
         self._stats_window_start = None
 
+        # local grid reach ahead of the car; rollouts past it see the edge cells
+        self.declare_parameter('grid_forward', 6.0)
         # Geometry is initialized after the fixed LiDAR pose becomes available.
         self.declare_parameter('obstacle_inflation', 0.22)
         self.declare_parameter('clearance_range', 0.25)
@@ -858,11 +874,10 @@ class MPPI(Node):
         inflation = float(self.get_parameter('obstacle_inflation').value)
         self._grid_settings = dict(
             width=3.0,
-            height=7.0,
+            height=float(self.get_parameter('grid_forward').value) + 1.0,
             middle=(1.5, 1.0),
             resolution=0.05,
             inflation_radius=inflation,
-            num_beams=811,
             # clearance is tracked this far past the inflation (clearance_weight range)
             distance_cap=inflation + float(self.get_parameter('clearance_range').value),
         )
@@ -1073,9 +1088,19 @@ class MPPI(Node):
         """
         return (float(self.get_parameter('lidar_forward_offset').value), 0.0, 0.0)
 
-    def _ensure_grid(self, scan_frame, scan_stamp):
-        """Cache rigid sensor geometry; resolve it again if either frame changes."""
-        frames = (self._odom_child_frame, scan_frame)
+
+    @staticmethod
+    def _scan_geometry(scan):
+        """Beam count and angular span of a cached scan."""
+        ranges, angle_min, angle_increment = scan[:3]
+        return dict(num_beams=len(ranges), angle_min=angle_min,
+                    angle_max=angle_min + angle_increment * (len(ranges) - 1))
+
+    def _ensure_grid(self, scan):
+        """Cache rigid sensor geometry; rebuild if a frame or the beam layout changes."""
+        scan_frame, scan_stamp = scan[5], scan[6]
+        geometry = self._scan_geometry(scan)
+        frames = (self._odom_child_frame, scan_frame, tuple(geometry.values()))
         if self._grid_frames == frames:
             return True
         lidar_pose = self._lookup_lidar_pose(scan_frame, scan_stamp)
@@ -1088,7 +1113,8 @@ class MPPI(Node):
         # Do not leave a previous drive command active during JAX compilation.
         self._publish_stop(self.get_clock().now())
         grid_start = time.perf_counter()
-        self.grid = og.OccupancyGrid.create(lidar_pose=lidar_pose, **self._grid_settings)
+        self.grid = og.OccupancyGrid.create(
+            lidar_pose=lidar_pose, **self._grid_settings, **geometry)
         jax.block_until_ready(self.grid)
         self.get_logger().info(
             f'Occupancy grid ready in {time.perf_counter() - grid_start:.3f} s; starting JAX warmup')
@@ -1181,7 +1207,7 @@ class MPPI(Node):
             return
 
         ranges, angle_min, angle_increment, range_min, range_max, scan_frame, scan_stamp = scan
-        if not self._ensure_grid(scan_frame, scan_stamp):
+        if not self._ensure_grid(scan):
             self._publish_stop(now)
             return
 
@@ -1261,6 +1287,8 @@ class MPPI(Node):
             target_speed = kinematic_speed_setpoint(
                 self._last_drive_command[1], x0[3], float(action[0]), self.config)
 
+        if self.tracker is not None:
+            target_speed = speed_setpoint(x0, action, self.config)
         drive_msg.drive.speed = float(target_speed)
         self._send_drive_command(drive_msg)
 

@@ -17,6 +17,9 @@ class MPPIConfig:
     STEER_BIAS: float = 0.15  # left/right proposal steering pulse [rad]
     BIAS_DURATION: float = 0.3  # pulse duration, then resume nominal steering [s]
     REFERENCE: str = "quintic"  # "quintic" spline or "linear" waypoint interpolation
+    # speed setpoint = v + a * lead; a P speed loop needs lead ~ 1/gain to realize a
+    SPEED_LEAD_TIME: float = 0.05  # when accelerating
+    BRAKE_LEAD_TIME: float = 0.05  # when braking (speed loops often brake harder)
 
     # ---------------------------------------------------
     # TODO: you may need to tune the following parameters
@@ -31,6 +34,7 @@ class MPPIConfig:
     TRACKING_DECAY: float = 1.0  # tracking weight of the last step relative to the first (linear)
     R: tuple = (0.01, 1.0)  # input cost [a, delta]
     Rd: tuple = (0.01, 1.0)  # input difference cost [a, delta]
+    OBSTACLE_WEIGHT: float = 10.0  # scale of the blocked-cell penalty
     # ---------------------------------------------------
 
     WB: float = 0.33  # Wheelbase [m]
