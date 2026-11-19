@@ -12,7 +12,7 @@ def launch_controller(context):
     """Apply explicit launch overrides after parameters loaded from car config."""
     overrides = {'odom_topic': LaunchConfiguration('odom_topic')}
     parameter_types = {
-        'track': str, 'tracker': str, 'dynamics': str,
+        'track': str, 'tracker': str, 'tracker_reference': str, 'dynamics': str,
         'publish_selected_paths': bool, 'publish_top_paths': bool, 'use_cpu': bool,
         'horizon': int, 'max_speed': float,
     }
@@ -40,6 +40,9 @@ def generate_launch_description():
             'track', default_value='', description='Override waypoint track name'),
         DeclareLaunchArgument(
             'tracker', default_value='', description='Override tracker: none or acados'),
+        DeclareLaunchArgument(
+            'tracker_reference', default_value='',
+            description='Override MPC target: spline or nominal'),
         DeclareLaunchArgument(
             'dynamics', default_value='', description='Override dynamics: kinematic or dynamic'),
         DeclareLaunchArgument('publish_selected_paths', default_value=''),

@@ -204,6 +204,8 @@ class LaunchDeviceTest(unittest.TestCase):
             node, = self.load_launch(name)
             self.assertIs(node.parameters[0]['use_cpu'], True)
             self.assertEqual(node.parameters[0]['odom_topic'], '/ego_racecar/odom')
+            self.assertEqual(node.parameters[0]['tracker'], 'acados')
+            self.assertEqual(node.parameters[0]['tracker_reference'], 'spline')
 
     def test_car_requires_gpu_and_explicit_odometry(self):
         *arguments, node = self.load_launch('car_launch.py')
