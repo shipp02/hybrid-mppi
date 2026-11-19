@@ -138,7 +138,7 @@
             0.4189
         ],
         "ubx": [
-            2.0
+            6.0
         ],
         "ubx_0": [
             0.0,
@@ -149,7 +149,7 @@
             0.0
         ],
         "ubx_e": [
-            2.0
+            6.0
         ],
         "ug": [],
         "ug_e": [],
@@ -500,7 +500,7 @@
         "mppi_bicycle_tracker_cost/mppi_bicycle_tracker_cost_y_e_fun_jac_ut_xt.c",
         "mppi_bicycle_tracker_cost/mppi_bicycle_tracker_cost_y_e_hess.c"
     ],
-    "hash": "d8918d78a1d8841070cf1bad24b1d972",
+    "hash": "e494409ae9fe382517659378a4e8789c",
     "model": {
         "con_h_expr_e": [],
         "con_phi_expr": [],
@@ -574,7 +574,7 @@
             "x5"
         ]
     },
-    "name": "ocp_mppi_bicycle_tracker_981ed371",
+    "name": "ocp_mppi_bicycle_tracker_dcafb48e",
     "p_global_values": [],
     "parameter_values": [],
     "problem_class": "OCP",

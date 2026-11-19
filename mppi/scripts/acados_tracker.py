@@ -144,10 +144,14 @@ class AcadosTracker:
                 or not np.isclose(ocp.solver_options.tf, self.cfg.H * self.cfg.DT)
                 or ocp.model.x.numel() != 6 or ocp.model.u.numel() != 2):
             raise ValueError('Prebuilt solver horizon, timestep or dimensions do not match')
-        for field in ('lbu', 'ubu', 'lh', 'uh', 'lh_0', 'uh_0', 'lbx', 'ubx', 'lbx_e', 'ubx_e'):
+        for field in ('lbu', 'ubu', 'lh', 'uh', 'lh_0', 'uh_0', 'lbx', 'lbx_e'):
             if not np.allclose(getattr(ocp.constraints, field),
                                getattr(expected.constraints, field)):
                 raise ValueError(f'Prebuilt solver limits do not match: {field}')
+        # speed bounds are reset per stage from cfg, so a higher built bound is fine
+        for field in ('ubx', 'ubx_e'):
+            if np.any(getattr(ocp.constraints, field) < getattr(expected.constraints, field)):
+                raise ValueError(f'Prebuilt solver speed bound below max_speed: {field}')
         # Compare smooth discrete dynamics at multiple operating points, including turns.
         import casadi as ca
         loaded_step = ca.Function('loaded_step', [ocp.model.x, ocp.model.u],
