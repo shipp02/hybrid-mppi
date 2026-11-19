@@ -13,7 +13,7 @@ def launch_controller(context):
     overrides = {'odom_topic': LaunchConfiguration('odom_topic')}
     parameter_types = {
         'track': str, 'tracker': str, 'dynamics': str,
-        'publish_selected_paths': bool, 'use_cpu': bool,
+        'publish_selected_paths': bool, 'publish_top_paths': bool, 'use_cpu': bool,
         'horizon': int, 'max_speed': float,
     }
     for name, value_type in parameter_types.items():
@@ -43,6 +43,7 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'dynamics', default_value='', description='Override dynamics: kinematic or dynamic'),
         DeclareLaunchArgument('publish_selected_paths', default_value=''),
+        DeclareLaunchArgument('publish_top_paths', default_value=''),
         DeclareLaunchArgument('use_cpu', default_value=''),
         DeclareLaunchArgument('horizon', default_value=''),
         DeclareLaunchArgument('max_speed', default_value=''),

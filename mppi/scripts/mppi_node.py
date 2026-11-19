@@ -4,6 +4,7 @@ from controller_config import MPPIConfig
 from functools import partial
 from typing import NamedTuple
 import time
+import json
 
 import jax
 import jax.numpy as jnp
@@ -13,7 +14,8 @@ from ackermann_msgs.msg import AckermannDriveStamped
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
 from geometry_msgs.msg import Point
-from visualization_msgs.msg import Marker
+from visualization_msgs.msg import Marker, MarkerArray
+from std_msgs.msg import String
 from rclpy.executors import ExternalShutdownException
 from utils import calc_interpolated_ref_trajectory_gpu, shift_sequence
 import occupancy_grid as og
@@ -155,7 +157,8 @@ def trajectory_to_car_frame(ref_traj, x, y, yaw):
     )
 
 
-def cost(X, U, ref, cfg, grid):
+def cost_components(X, U, ref, cfg, grid):
+    """Per-timestep objective terms shared by optimization and diagnostics."""
     tracked = db.tracking_state(X, cfg) if cfg.DYNAMICS == 'dynamic' else X
     error = tracked[1:] - ref[1:]
 
@@ -211,7 +214,32 @@ def cost(X, U, ref, cfg, grid):
     envelope_cost = 0.
     if cfg.DYNAMICS == 'dynamic':
         envelope_cost = cfg.ENVELOPE_WEIGHT * jnp.sum(db.envelope_excess(X[1:], cfg) ** 2, axis=1)
-    return state_cost + input_cost + input_difference_cost + obs_block_cost + envelope_cost
+    return dict(tracking=state_cost, control=input_cost,
+                control_change=input_difference_cost, obstacle=obs_block_cost,
+                envelope=jnp.broadcast_to(envelope_cost, state_cost.shape))
+
+
+def cost(X, U, ref, cfg, grid):
+    parts = cost_components(X, U, ref, cfg, grid)
+    return (parts['tracking'] + parts['control'] + parts['control_change']
+            + parts['obstacle'] + parts['envelope'])
+
+
+class TopPaths(NamedTuple):
+    xy: jax.Array
+    totals: jax.Array
+    components: dict
+
+
+def select_top_paths(X, U, C, ref, cfg, grid):
+    """Rank total costs on device; export only best 50 XY and objective sums."""
+    totals = jnp.sum(C, axis=1)
+    scores = jnp.where(jnp.isfinite(totals), totals, jnp.inf)
+    indices = jnp.argsort(scores, stable=True)[:min(50, cfg.T)]
+    parts = jax.vmap(cost_components, in_axes=(0, 0, None, None, None))(
+        X[indices], U[indices], ref, cfg, grid)
+    return TopPaths(X[indices, :, :2], totals[indices],
+                    {name: jnp.sum(values, axis=1) for name, values in parts.items()})
 
 
 def sample_controls(key, U, U_std, cfg):
@@ -279,7 +307,7 @@ def sample_rollout_controls(key, U, U_std, x0, cfg):
     return samples
 
 
-def mppi_update(key, U, U_std, x0, ref, cfg, grid):
+def mppi_update(key, U, U_std, x0, ref, cfg, grid, *, export_top_paths=False):
     U_samples = sample_rollout_controls(key, U, U_std, x0, cfg)
 
     # 2. Simulate: roll out all T sequences from x0
@@ -316,7 +344,10 @@ def mppi_update(key, U, U_std, x0, ref, cfg, grid):
     U_std_new = (1.0 - cfg.COV_ALPHA) * U_std + cfg.COV_ALPHA * jnp.sqrt(variance)
     U_std_new = jnp.clip(U_std_new, jnp.array(cfg.U_STD_MIN), jnp.array(cfg.U_STD))
 
-    return U_new, U_std_new, X_samples, weights
+    outputs = (U_new, U_std_new, X_samples, weights)
+    if export_top_paths:
+        return (*outputs, select_top_paths(X_samples, U_samples, C, ref, cfg, grid))
+    return outputs
 
 
 @partial(jax.jit, static_argnames=("cfg",))
@@ -348,6 +379,7 @@ class OptimizationResult(NamedTuple):
     state: ControllerState
     samples: jax.Array
     weights: jax.Array
+    top_paths: TopPaths | None = None
 
 
 class ControlResult(NamedTuple):
@@ -356,6 +388,7 @@ class ControlResult(NamedTuple):
     action: jax.Array
     path_xy: jax.Array | None
     feasible: jax.Array = True
+    top_paths: TopPaths | None = None
 
 
 def prepare_warm_start(state, observation, cfg):
@@ -381,13 +414,16 @@ def build_reference(x0, course, cfg):
         max_accel=cfg.MAX_ACCEL)
 
 
-def optimize_controls(state, x0, reference, grid, cfg):
+def optimize_controls(state, x0, reference, grid, cfg, export_top_paths=False):
     """Own sampling RNG advancement and fixed/adaptive covariance policy."""
     key, sample_key = jax.random.split(state.key)
-    U, updated_std, samples, weights = mppi_update(
-        sample_key, state.U, state.U_std, x0, reference, cfg, grid)
+    outputs = mppi_update(
+        sample_key, state.U, state.U_std, x0, reference, cfg, grid,
+        export_top_paths=export_top_paths)
+    U, updated_std, samples, weights = outputs[:4]
+    top_paths = outputs[4] if export_top_paths else None
     U_std = updated_std if cfg.COV_UPDATE else state.U_std
-    return OptimizationResult(ControllerState(key, U, U_std), samples, weights)
+    return OptimizationResult(ControllerState(key, U, U_std), samples, weights, top_paths)
 
 
 def select_control_outputs(solution, x0, grid, cfg, export_path):
@@ -401,25 +437,27 @@ def select_control_outputs(solution, x0, grid, cfg, export_path):
         if export_path:
             path_xy = nominal[:, :2]
     return ControlResult(
-        solution.state, grid, solution.state.U[0], path_xy, feasible)
+        solution.state, grid, solution.state.U[0], path_xy, feasible, solution.top_paths)
 
 
-@partial(jax.jit, static_argnames=("cfg", "export_path"))
-def control_step(state, observation, course, grid, cfg, *, export_path=False):
+@partial(jax.jit, static_argnames=("cfg", "export_path", "export_top_paths"))
+def control_step(state, observation, course, grid, cfg, *, export_path=False,
+                 export_top_paths=False):
     """One compiled dispatch; helpers preserve domain responsibility boundaries."""
     state = prepare_warm_start(state, observation, cfg)
     grid = grid.from_scan(observation.ranges)
     reference = build_reference(observation.x0, course, cfg)
-    solution = optimize_controls(state, observation.x0, reference, grid, cfg)
+    solution = optimize_controls(
+        state, observation.x0, reference, grid, cfg, export_top_paths)
     return select_control_outputs(
         solution, observation.x0, grid, cfg, export_path)
 
 
-@partial(jax.jit, static_argnames=("cfg",))
-def tracking_control_step(state, observation, course, grid, cfg):
+@partial(jax.jit, static_argnames=("cfg", "export_top_paths"))
+def tracking_control_step(state, observation, course, grid, cfg, *, export_top_paths=False):
     """Keep optimization on device; export only selected nominal, never sample batch."""
     result = control_step(
-        state, observation, course, grid, cfg)
+        state, observation, course, grid, cfg, export_top_paths=export_top_paths)
     nominal = simulate(observation.x0, result.state.U, cfg)
     return result, nominal
 
@@ -544,6 +582,14 @@ class MPPI(Node):
             self.waypoints[:, :2], yaw, self.waypoints[:, 3],
         )).astype(np.float32), self.device)
 
+        self.declare_parameter('publish_top_paths', False)
+        self.top_paths_publisher = None
+        self.top_costs_publisher = None
+        if self.get_parameter('publish_top_paths').value:
+            self.top_paths_publisher = self.create_publisher(
+                MarkerArray, '/mppi/top_paths', 1)
+            self.top_costs_publisher = self.create_publisher(
+                String, '/mppi/top_paths/costs', 1)
         self.declare_parameter('publish_selected_paths', False)
         self.declare_parameter('path_frame', 'map')
         self._publish_waypoints()
@@ -629,10 +675,12 @@ class MPPI(Node):
         if self.tracker is None:
             result = control_step(
                 self.control_state, observation, self.course, self.grid,
-                self.config, export_path=self.path_publisher is not None)
+                self.config, export_path=self.path_publisher is not None,
+                export_top_paths=getattr(self, 'top_paths_publisher', None) is not None)
         else:
             result = tracking_control_step(
-                self.control_state, observation, self.course, self.grid, self.config)
+                self.control_state, observation, self.course, self.grid, self.config,
+                export_top_paths=getattr(self, 'top_paths_publisher', None) is not None)
         jax.block_until_ready(result)
         self.get_logger().info(f'MPPI ready: {self.config}')
 
@@ -703,7 +751,8 @@ class MPPI(Node):
         if self.tracker is None:
             result = control_step(
                 self.control_state, observation, self.course, self.grid,
-                self.config, export_path=self.path_publisher is not None)
+                self.config, export_path=self.path_publisher is not None,
+                export_top_paths=getattr(self, 'top_paths_publisher', None) is not None)
             self._publish_control_result(result, observation, now)
         else:
             self._track_and_publish(observation, now)
@@ -713,7 +762,9 @@ class MPPI(Node):
         """Plan on GPU, track on CPU, then publish one command."""
         result, nominal = tracking_control_step(
             self.control_state, observation, self.course, self.grid,
-            self.config)
+            self.config,
+            export_top_paths=getattr(self, 'top_paths_publisher', None) is not None)
+        self._publish_top_paths(result.top_paths, now)
         self.control_state, self.grid = result.state, result.grid
         states, controls = jax.device_get((nominal, result.state.U))
         try:
@@ -780,6 +831,7 @@ class MPPI(Node):
 
     def _publish_control_result(self, result, observation, now):
         """Keep persistent arrays resident; read back only publication outputs."""
+        self._publish_top_paths(result.top_paths, now)
         self.control_state = result.state
         self.grid = result.grid
         action, feasible = jax.device_get((result.action, result.feasible))
@@ -792,6 +844,49 @@ class MPPI(Node):
         if self.path_publisher is not None:
             path_xy = jax.device_get(result.path_xy)
             self.path_publisher.history.try_record(path_xy, now.nanoseconds)
+
+    def _publish_top_paths(self, top_paths, now):
+        """Read back selected diagnostics, then publish rank-matched messages."""
+        if top_paths is None:
+            return
+        paths = jax.device_get(top_paths)
+        self.top_paths_publisher.publish(self._top_path_markers(paths, now))
+        self.top_costs_publisher.publish(self._top_path_costs(paths, now))
+
+    def _top_path_markers(self, paths, now):
+        markers = MarkerArray()
+        for rank, xy in enumerate(paths.xy):
+            marker = Marker()
+            marker.header.frame_id = self.get_parameter('path_frame').value
+            marker.header.stamp = now.to_msg()
+            marker.ns = 'top_paths'
+            marker.id = rank
+            marker.type = Marker.LINE_STRIP
+            marker.action = Marker.ADD
+            marker.pose.orientation.w = 1.0
+            marker.scale.x = 0.025
+            marker.color.r = float(rank / max(1, len(paths.xy) - 1))
+            marker.color.g = 1.0 - marker.color.r
+            marker.color.a = 0.7
+            marker.lifetime.sec = 1
+            marker.points = [Point(x=float(x), y=float(y), z=0.05) for x, y in xy]
+            markers.markers.append(marker)
+        return markers
+
+    def _top_path_costs(self, paths, now):
+        records = []
+        for rank, total in enumerate(paths.totals):
+            record = dict(rank=rank, total=float(total),
+                          **{name: float(values[rank])
+                             for name, values in paths.components.items()})
+            # Strict JSON: non-finite diagnostics become null, not NaN literals.
+            records.append({key: value if np.isfinite(value) else None
+                            for key, value in record.items()})
+        message = String()
+        message.data = json.dumps(dict(stamp_ns=now.nanoseconds,
+                                       frame_id=self.get_parameter('path_frame').value,
+                                       paths=records), allow_nan=False)
+        return message
 
     def _publish_drive(self, action, x0, now):
         drive_msg = AckermannDriveStamped()
