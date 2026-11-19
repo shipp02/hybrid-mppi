@@ -49,6 +49,13 @@ class GeneratedTrackerTest(unittest.TestCase):
                          [cfg.MIN_ACCEL, cfg.MIN_STEER])
         self.assertEqual(self.payload['constraints']['ubu'],
                          [cfg.MAX_ACCEL, cfg.MAX_STEER])
+        self.assertEqual(self.payload['constraints']['ubx'], [cfg.MAX_SPEED])
+
+    def test_first_step_steering_slew_is_constrained(self):
+        constraints = self.payload['constraints']
+        self.assertEqual(self.payload['dims']['nh_0'], 1)
+        self.assertEqual(constraints['lh_0'], constraints['lh'])
+        self.assertEqual(constraints['uh_0'], constraints['uh'])
 
 
 if __name__ == '__main__':
