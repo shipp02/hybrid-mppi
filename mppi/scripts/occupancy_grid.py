@@ -160,8 +160,12 @@ class OccupancyGrid:
         )
 
     @jax.jit
-    def from_scan(self, ranges) -> OccupancyGrid:
-        """Rebuild from one scan; previous cell values are not fused."""
+    def from_scan(self, ranges, range_max=jnp.inf) -> OccupancyGrid:
+        """Rebuild one scan; +Inf clears through range_max without a hit.
+
+        Callers without a sensor range limit leave no-return rays unbounded.
+        Previous cell values are not fused.
+        """
         cfg, precomps = self.spec, self._geometry
         ranges = jnp.asarray(ranges, dtype=jnp.result_type(float))
         if ranges.shape != (cfg.num_beams,):
@@ -169,6 +173,7 @@ class OccupancyGrid:
 
         valid = jnp.isfinite(ranges) & (ranges > 0.0)
         safe = jnp.where(valid, ranges, 0.0)
+        no_return = jnp.isposinf(ranges)
         rows_n, cols_n = cfg.shape
 
         cells = jnp.full((rows_n, cols_n), UNKNOWN, dtype=jnp.uint8)
@@ -182,7 +187,9 @@ class OccupancyGrid:
         cells = jnp.where(hit, jnp.uint8(OCCUPIED), cells)
 
         # Detect free cells
-        free = in_fov & valid[beam] & (cell_range < safe[beam] - cfg.resolution / 2.0)
+        measured_free = valid[beam] & (cell_range < safe[beam] - cfg.resolution / 2.0)
+        no_return_free = no_return[beam] & (cell_range <= range_max)
+        free = in_fov & (measured_free | no_return_free)
         cells = jnp.where(free, jnp.uint8(FREE), cells)
 
         # Obstacles to run distance transform on

@@ -370,6 +370,7 @@ class ControlObservation(NamedTuple):
     ranges: jax.Array
     elapsed: jax.Array
     reset: jax.Array
+    range_max: jax.Array = np.float32(np.inf)
 
 
 class OptimizationResult(NamedTuple):
@@ -442,7 +443,7 @@ def control_step(state, observation, course, grid, cfg, *, export_path=False,
                  export_top_paths=False):
     """One compiled dispatch; helpers preserve domain responsibility boundaries."""
     state = prepare_warm_start(state, observation, cfg)
-    grid = grid.from_scan(observation.ranges)
+    grid = grid.from_scan(observation.ranges, observation.range_max)
     reference = build_reference(observation.x0, course, cfg)
     solution = optimize_controls(
         state, observation.x0, reference, grid, cfg, export_top_paths)
@@ -816,7 +817,8 @@ class MPPI(Node):
         )
         self.last_x0 = x0.copy()
         return ControlObservation(
-            x0.astype(np.float32), ranges, np.float32(elapsed), np.bool_(reset))
+            x0.astype(np.float32), ranges, np.float32(elapsed), np.bool_(reset),
+            np.float32(range_max))
 
     def _observed_vehicle_state(self, odom):
         """Use latest published setpoints, not command state from an older odom tick."""
