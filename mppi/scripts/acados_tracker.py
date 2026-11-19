@@ -69,24 +69,38 @@ def build_ocp(cfg, max_steer_rate, export_directory):
     return ocp
 
 
-def prepare_reference(x0, states, controls, previous_control, cfg):
-    """Validate MPPI payload and align continuous yaw with measured quaternion yaw."""
+def _align_yaw(states, yaw0):
+    """Continuous yaw, shifted by whole turns to sit next to the measured yaw."""
+    states = states.copy()
+    states[:, 2] = np.unwrap(states[:, 2])
+    states[:, 2] += 2 * np.pi * np.round((yaw0 - states[0, 2]) / (2 * np.pi))
+    return states
+
+
+def prepare_reference(x0, states, controls, previous_control, cfg, reference=None):
+    """Validate MPPI payload; return iterate and tracking targets with aligned yaw.
+
+    The MPPI nominal seeds the RTI iterate. Targets are the sampled spline
+    reference when given, otherwise the nominal itself.
+    """
     x0 = np.asarray(x0, dtype=float)
     states = np.array(states, dtype=float, copy=True)
     controls = np.asarray(controls, dtype=float)
     previous_control = np.asarray(previous_control, dtype=float)
+    targets = states if reference is None else np.array(reference, dtype=float)
     if (x0.shape != (4,) or states.shape != (cfg.H + 1, 4)
+            or targets.shape != (cfg.H + 1, 4)
             or controls.shape != (cfg.H, 2) or previous_control.shape != (2,)):
         raise ValueError('Invalid tracker state/control horizon dimensions')
     if not all(np.isfinite(value).all()
-               for value in (x0, states, controls, previous_control)):
+               for value in (x0, states, targets, controls, previous_control)):
         raise ValueError('Non-finite tracker input')
-    states[:, 2] = np.unwrap(states[:, 2])
-    states[:, 2] += 2 * np.pi * np.round((x0[2] - states[0, 2]) / (2 * np.pi))
+    states = _align_yaw(states, x0[2])
+    targets = _align_yaw(targets, x0[2])
     augmented = np.column_stack((states, np.vstack((previous_control, controls))))
     initial = np.concatenate((x0, previous_control))
     augmented[0] = initial
-    return initial, augmented, controls
+    return initial, augmented, controls, targets
 
 
 class AcadosTracker:
@@ -148,15 +162,15 @@ class AcadosTracker:
         ocp.code_gen_options.acados_lib_path = str(acados_root / 'lib')
         return ocp
 
-    def _load_reference(self, initial, nominal, controls):
+    def _load_reference(self, initial, nominal, controls, targets):
         """Set RTI iterate and tracking targets, including measured initial state."""
         for stage in range(self.cfg.H):
             self.solver.set(stage, 'x', nominal[stage])
             self.solver.set(stage, 'u', controls[stage])
             self.solver.set(stage, 'yref', np.concatenate(
-                (nominal[stage, :4], controls[stage], np.zeros(2))))
+                (targets[stage], controls[stage], np.zeros(2))))
         self.solver.set(self.cfg.H, 'x', nominal[-1])
-        self.solver.set(self.cfg.H, 'yref', nominal[-1, :4])
+        self.solver.set(self.cfg.H, 'yref', targets[-1])
         self.solver.set(0, 'lbx', initial)
         self.solver.set(0, 'ubx', initial)
         # Permit bounded deceleration back into limits after noisy/out-of-range odometry.
@@ -181,10 +195,10 @@ class AcadosTracker:
             raise RuntimeError('acados steering slew limit violated')
         return np.clip(controls, lower, upper)
 
-    def solve(self, x0, states, controls, previous_control):
-        initial, nominal, controls = prepare_reference(
-            x0, states, controls, previous_control, self.cfg)
-        self._load_reference(initial, nominal, controls)
+    def solve(self, x0, states, controls, previous_control, reference=None):
+        initial, nominal, controls, targets = prepare_reference(
+            x0, states, controls, previous_control, self.cfg, reference)
+        self._load_reference(initial, nominal, controls, targets)
         status = self.solver.solve()
         if status != 0:
             raise RuntimeError(f'acados solve failed: status {status}')

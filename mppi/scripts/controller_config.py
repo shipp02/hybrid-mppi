@@ -13,6 +13,7 @@ class MPPIConfig:
     INTEGRATOR: str = "rk4"  # "euler" or "rk4" (bonus)
     SAMPLING: str = "uniform"  # "clip", or bonus: "truncated" (normal) or "uniform"
     COV_UPDATE: bool = True  # bonus: adapt the sampling std of each step
+    REFERENCE: str = "quintic"  # "quintic" spline or "linear" waypoint interpolation
 
     # ---------------------------------------------------
     # TODO: you may need to tune the following parameters
@@ -60,6 +61,8 @@ class MPPIConfig:
 
         if self.DYNAMICS not in ('kinematic', 'dynamic'):
             raise ValueError('dynamics must be kinematic or dynamic')
+        if self.REFERENCE not in ('quintic', 'linear'):
+            raise ValueError('reference must be quintic or linear')
         object.__setattr__(self, 'NX', 8 if self.DYNAMICS == 'dynamic' else 4)
         if self.DYNAMICS == 'kinematic':
             return

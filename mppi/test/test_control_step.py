@@ -23,7 +23,7 @@ def load_controller():
     tree = ast.parse(path.read_text(), filename=str(path))
     allowed = {'dataclasses', 'functools', 'typing', 'time', 'jax', 'jax.numpy',
                'numpy', 'utils', 'occupancy_grid', 'controller_config', 'dynamic_bicycle',
-               'selected_path_publisher', 'os'}
+               'selected_path_publisher', 'os', 'quintic_spline'}
     tree.body = [node for node in tree.body
                  if isinstance(node, (ast.FunctionDef, ast.ClassDef))
                  or isinstance(node, ast.ImportFrom) and node.module in allowed
@@ -41,12 +41,13 @@ controller = load_controller()
 
 class ControlStepTest(unittest.TestCase):
     def setUp(self):
-        self.cfg = controller.MPPIConfig(H=5, T=8)
+        # legacy parity reconstructs the linear reference on an open line
+        self.cfg = controller.MPPIConfig(H=5, T=8, REFERENCE='linear')
         self.grid = controller.og.OccupancyGrid.create(
             width=1.0, height=2.0, middle=(0.5, 0.3), resolution=0.2,
             num_beams=21, distance_cap=0.2, inflation_radius=0.1)
         x = np.linspace(0, 5, 51, dtype=np.float32)
-        self.course = jnp.asarray(np.column_stack((x, x * 0, x * 0, x * 0 + 2)))
+        self.course = controller.make_course(np.column_stack((x, x * 0, x * 0, x * 0 + 2)))
         self.state = controller.ControllerState(
             jax.random.PRNGKey(7),
             jnp.full((self.cfg.H, self.cfg.NU), 0.05),
@@ -66,7 +67,7 @@ class ControlStepTest(unittest.TestCase):
             std = controller.shift_sequence(std, obs.elapsed, jnp.array(cfg.U_STD), cfg.DT)
         grid = self.grid.from_scan(obs.ranges)
         ref = controller.calc_interpolated_ref_trajectory_gpu(
-            obs.x0[0], obs.x0[1], *self.course.T, cfg.DT, cfg.H,
+            obs.x0[0], obs.x0[1], *self.course.waypoints.T, cfg.DT, cfg.H,
             v0=obs.x0[3], max_accel=cfg.MAX_ACCEL)
         key, subkey = jax.random.split(state.key)
         if cfg.COV_UPDATE:
