@@ -36,6 +36,7 @@ class GridSpec:
     start_clearance: float = 0.10
     car_length: float = 0.58
     car_width: float = 0.31
+    car_center: tuple[float, float] = (0.0, 0.0)  # [forward, left] from state origin
     footprint_margin: float = 0.02
 
     def __post_init__(self) -> None:
@@ -47,6 +48,8 @@ class GridSpec:
             raise ValueError("need angle_min < angle_max and num_beams >= 2")
         if self.start_radius < 0.0 or self.start_clearance < 0.0:
             raise ValueError("start_radius and start_clearance must be non-negative")
+        if self.car_length <= 0.0 or self.car_width <= 0.0:
+            raise ValueError("car_length and car_width must be positive")
 
     # -- static geometry (plain Python/NumPy, also usable at trace time) --------
     @property
@@ -90,17 +93,20 @@ class _GridGeometry(NamedTuple):
         # 1. Constants & vehicle footprint mask
         inc = (cfg.angle_max - cfg.angle_min) / (cfg.num_beams - 1)
         angles = cfg.angle_min + np.arange(cfg.num_beams) * inc
-        cx = (np.arange(cols_n) + 0.5) * cfg.resolution
-        cy = (np.arange(rows_n) + 0.5) * cfg.resolution
         cos_angles = jnp.array(np.cos(angles))
         sin_angles = jnp.array(np.sin(angles))
-        at_car = jnp.array(np.hypot(cx[None, :] - cfg.middle[0], cy[:, None] - cfg.middle[1]) <= cfg.start_radius)
 
         # 2. Fixed sensor geometry: inverse pose maps car-frame cells into LiDAR.
         # lidar_pose is [forward, left, yaw] in the car frame.
         forward = (np.arange(rows_n) + 0.5) * cfg.resolution - cfg.middle[1]
         left = (np.arange(cols_n) + 0.5) * cfg.resolution - cfg.middle[0]
         forward, left = np.meshgrid(forward, left, indexing="ij")
+        # Only physical interior is known free without a scan. No safety halo:
+        # clearing outside the body could erase unseen nearby obstacles.
+        at_car = jnp.array(
+            (np.abs(forward - cfg.car_center[0]) <= cfg.car_length / 2.0)
+            & (np.abs(left - cfg.car_center[1]) <= cfg.car_width / 2.0)
+        )
         sensor_forward, sensor_left, sensor_yaw = lidar_pose
         df, dl = forward - sensor_forward, left - sensor_left
         c, s = np.cos(sensor_yaw), np.sin(sensor_yaw)
@@ -185,7 +191,9 @@ class OccupancyGrid:
         free = in_fov & valid[beam] & (cell_range < safe[beam] - cfg.resolution / 2.0)
         cells = jnp.where(free, jnp.uint8(FREE), cells)
 
-        # Obstacles to run distance transform on
+        cells = self._clear_vehicle_interior(cells)
+
+        # Obstacles to run distance transform on, after resolving self-blind cells.
         obstacle_mask = (cells == OCCUPIED) | (cells == UNKNOWN)
 
         # Compute distance field via a localized gathering on each coordinate
@@ -200,6 +208,11 @@ class OccupancyGrid:
 
         free_distance = compute_cell_distance(precomps.y_flat, precomps.x_flat).reshape(rows_n, cols_n)
         return replace(self, cells=cells, free_distance=free_distance)
+
+    def _clear_vehicle_interior(self, cells):
+        """Resolve unknown self-blind cells without overwriting measured hits."""
+        unknown_interior = self._geometry.at_car & (cells == UNKNOWN)
+        return jnp.where(unknown_interior, jnp.uint8(FREE), cells)
 
     def is_free(self, pos: jax.Array) -> jax.Array:
         """Check batched [forward, left, yaw] poses; yaw is ignored.
