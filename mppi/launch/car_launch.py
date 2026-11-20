@@ -15,6 +15,7 @@ def launch_controller(context):
         'track': str, 'tracker': str, 'tracker_reference': str, 'dynamics': str,
         'publish_selected_paths': bool, 'publish_top_paths': bool, 'use_cpu': bool,
         'horizon': int, 'max_speed': float,
+        'planner': str, 'high_enter_speed': float, 'high_exit_speed': float,
     }
     for name, value_type in parameter_types.items():
         value = LaunchConfiguration(name).perform(context)
@@ -50,5 +51,13 @@ def generate_launch_description():
         DeclareLaunchArgument('use_cpu', default_value=''),
         DeclareLaunchArgument('horizon', default_value=''),
         DeclareLaunchArgument('max_speed', default_value=''),
+        DeclareLaunchArgument(
+            'planner', default_value='', description='Override planner: mppi, mpc or hybrid'),
+        DeclareLaunchArgument(
+            'high_enter_speed', default_value='',
+            description='Hybrid: speed that starts the high-speed planner [m/s]'),
+        DeclareLaunchArgument(
+            'high_exit_speed', default_value='',
+            description='Hybrid: speed that hands back to the low-speed planner [m/s]'),
         OpaqueFunction(function=launch_controller),
     ])
