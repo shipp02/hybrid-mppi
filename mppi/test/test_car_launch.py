@@ -51,10 +51,12 @@ class CarLaunchTest(unittest.TestCase):
             self.assertEqual(arguments[name]['default_value'], '')
         node, = launch_controller({'planner': 'hybrid', 'high_enter_speed': '1.5',
                                    'high_exit_speed': '1.0', 'odom_topic': '/pf/pose/odom'})
-        overrides = node.parameters[1]
-        self.assertEqual(overrides['planner'], ('hybrid', str))
-        self.assertEqual(overrides['high_enter_speed'], ('1.5', float))
-        self.assertEqual(overrides['high_exit_speed'], ('1.0', float))
+        overrides = {name: (node.parameters[1][name][0].name, node.parameters[1][name][1])
+                     for name in ('planner', 'high_enter_speed', 'high_exit_speed')}
+        # the substitution, not its text: launch_ros converts it to value_type
+        self.assertEqual(overrides['planner'], ('planner', str))
+        self.assertEqual(overrides['high_enter_speed'], ('high_enter_speed', float))
+        self.assertEqual(overrides['high_exit_speed'], ('high_exit_speed', float))
 
     def test_unset_arguments_leave_config_file_values(self):
         _, launch_controller = load_car_launch()
