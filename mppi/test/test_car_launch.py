@@ -45,12 +45,25 @@ def load_car_launch():
 
 
 class CarLaunchTest(unittest.TestCase):
+    def test_runs_without_arguments_using_config_odometry(self):
+        arguments, launch_controller = load_car_launch()
+        self.assertEqual(arguments['odom_topic']['default_value'], '')
+        node, = launch_controller({})
+        self.assertNotIn('odom_topic', node.parameters[1])  # car_config.yaml supplies it
+        config_text = (LAUNCH.parents[2] / 'config' / 'car_config.yaml').read_text()
+        self.assertIn('odom_topic: /pf/pose/odom', config_text)
+
+    def test_odom_topic_argument_overrides_config(self):
+        _, launch_controller = load_car_launch()
+        node, = launch_controller({'odom_topic': '/other/odom'})
+        value, value_type = node.parameters[1]['odom_topic']
+        self.assertEqual((value.name, value_type), ('odom_topic', str))
+
     def test_typed_overrides_pass_the_substitution(self):
         arguments, launch_controller = load_car_launch()
         for name in ('max_speed', 'use_cpu'):
             self.assertEqual(arguments[name]['default_value'], '')
-        node, = launch_controller({'max_speed': '1.0', 'use_cpu': 'true',
-                                   'odom_topic': '/pf/pose/odom'})
+        node, = launch_controller({'max_speed': '1.0', 'use_cpu': 'true'})
         overrides = node.parameters[1]
         # the substitution, not its text: launch_ros converts it to value_type
         self.assertEqual((overrides['max_speed'][0].name, overrides['max_speed'][1]),
@@ -60,7 +73,7 @@ class CarLaunchTest(unittest.TestCase):
 
     def test_unset_arguments_leave_config_file_values(self):
         _, launch_controller = load_car_launch()
-        node, = launch_controller({'odom_topic': '/pf/pose/odom'})
+        node, = launch_controller({})
         self.assertNotIn('max_speed', node.parameters[1])
         self.assertNotIn('use_cpu', node.parameters[1])
 

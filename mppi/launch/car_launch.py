@@ -1,4 +1,4 @@
-"""Launch GPU controller on car; provide odom_topic for installed localization."""
+"""Launch GPU controller on car; odom_topic comes from car_config.yaml unless overridden."""
 from launch import LaunchDescription
 from ament_index_python.packages import get_package_share_directory
 from launch.actions import DeclareLaunchArgument, OpaqueFunction
@@ -10,9 +10,9 @@ from launch_ros.parameter_descriptions import ParameterValue
 
 def launch_controller(context):
     """Apply explicit launch overrides after parameters loaded from car config."""
-    overrides = {'odom_topic': LaunchConfiguration('odom_topic')}
+    overrides = {}
     parameter_types = {
-        'track': str, 'tracker': str, 'tracker_reference': str, 'dynamics': str,
+        'odom_topic': str, 'track': str, 'tracker': str, 'tracker_reference': str, 'dynamics': str,
         'publish_selected_paths': bool, 'publish_top_paths': bool, 'use_cpu': bool,
         'horizon': int, 'max_speed': float,
     }
@@ -32,7 +32,8 @@ def launch_controller(context):
 def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument(
-            'odom_topic', description='Car localization odometry topic'),
+            'odom_topic', default_value='',
+            description='Override localization odometry topic (map frame, e.g. /pf/pose/odom)'),
         DeclareLaunchArgument(
             'config_file', default_value=os.path.join(
                 get_package_share_directory('mppi'), 'config', 'car_config.yaml'),
