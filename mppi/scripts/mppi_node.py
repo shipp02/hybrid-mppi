@@ -3,6 +3,7 @@ from dataclasses import fields, replace
 from controller_config import MPPIConfig
 from functools import partial
 from typing import NamedTuple
+import signal
 import time
 
 import jax
@@ -17,6 +18,7 @@ from geometry_msgs.msg import Point
 from visualization_msgs.msg import Marker
 from rclpy.executors import ExternalShutdownException
 from std_msgs.msg import Float32
+from rclpy.signals import SignalHandlerOptions
 from utils import calc_interpolated_ref_trajectory_gpu, shift_sequence
 from quintic_spline import QuinticSpline, fit_quintic_spline, sample_quintic_reference
 import occupancy_grid as og
@@ -1343,6 +1345,14 @@ class MPPI(Node):
         msg.drive.steering_angle = 0.0
         self._send_drive_command(msg)
 
+    def stop_vehicle(self, repeats=5):
+        """Leave the car stopped: the driver keeps applying the last /drive."""
+        if not rclpy.ok():
+            return
+        for _ in range(repeats):
+            self._publish_stop(self.get_clock().now())
+            time.sleep(0.01)
+
     def destroy_node(self):
         """Release the optional publisher process before shutting down ROS."""
         if self.path_publisher is not None:
@@ -1350,16 +1360,27 @@ class MPPI(Node):
         return super().destroy_node()
 
 
+def _interrupt(signum, frame):
+    raise KeyboardInterrupt
+
+
 def main(args=None):
-    rclpy.init(args=args)
+    # Own SIGINT/SIGTERM: rclpy's handler shuts the context down first, and the
+    # stop command could no longer be published.
+    rclpy.init(args=args, signal_handler_options=SignalHandlerOptions.NO)
+    signal.signal(signal.SIGINT, _interrupt)
+    signal.signal(signal.SIGTERM, _interrupt)
     print("MPPI Initialized")
-    mppi_node = MPPI()
+    mppi_node = None
     try:
+        mppi_node = MPPI()
         rclpy.spin(mppi_node)
     except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
-        mppi_node.destroy_node()
+        if mppi_node is not None:
+            mppi_node.stop_vehicle()
+            mppi_node.destroy_node()
         rclpy.try_shutdown()
 
 
