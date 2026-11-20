@@ -17,30 +17,31 @@ class PlannerSwitchTest(unittest.TestCase):
         self.assertEqual(switch.uses, {'mpc'})
 
     def test_hysteresis_between_thresholds(self):
-        switch = PlannerSwitch('mpc', 'mppi', up_speed=3., down_speed=2.)
+        switch = PlannerSwitch('mpc', 'mppi', high_enter=3., high_exit=2.)
         speeds = [0., 2.5, 3., 2.5, 2.1, 2., 2.5]
         self.assertEqual([switch.select(v) for v in speeds],
                          ['mpc', 'mpc', 'mppi', 'mppi', 'mppi', 'mpc', 'mpc'])
 
     def test_dwell_delays_switch_back(self):
-        switch = PlannerSwitch('mpc', 'mppi', up_speed=3., down_speed=2., min_dwell=3)
+        switch = PlannerSwitch('mpc', 'mppi', high_enter=3., high_exit=2., min_dwell=3)
         self.assertEqual(switch.select(4.), 'mppi')  # starts eligible to switch
         self.assertEqual([switch.select(0.) for _ in range(3)], ['mppi', 'mppi', 'mpc'])
 
     def test_reset_returns_to_low_speed_planner(self):
-        switch = PlannerSwitch('mppi', 'mpc', up_speed=1.5, down_speed=1.)
+        switch = PlannerSwitch('mppi', 'mpc', high_enter=1.5, high_exit=1.)
         switch.select(5.)
         switch.reset()
         self.assertEqual(switch.active, 'mppi')
         self.assertEqual(switch.select(5.), 'mpc')
 
     def test_invalid_configuration(self):
-        for args in (('mpc', 'pid', 3., 2.), ('mpc', 'mppi', 2., 3.)):
+        # exit must sit strictly below enter: zero-width hysteresis is rejected
+        for args in (('mpc', 'pid', 3., 2.), ('mpc', 'mppi', 2., 3.), ('mpc', 'mppi', 3., 3.)):
             with self.assertRaises(ValueError):
                 PlannerSwitch(*args)
         with self.assertRaises(ValueError):
             PlannerSwitch('mpc', 'mppi', 3., 2., min_dwell=-1)
-        self.assertEqual(PlannerSwitch.fixed('mppi').up_speed, math.inf)
+        self.assertEqual(PlannerSwitch.fixed('mppi').high_enter, math.inf)
 
 
 class NodePlannerTest(unittest.TestCase):

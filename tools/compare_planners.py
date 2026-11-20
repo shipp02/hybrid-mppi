@@ -179,7 +179,8 @@ def run(args, controller_cls=Controller):
                   **config_overrides(args.set))
     course = load_waypoints(args.track, args.max_speed)
     from planner_switch import PlannerSwitch
-    switch = PlannerSwitch(args.low, args.high, args.up, args.down, int(round(args.dwell / cfg.DT)))
+    switch = PlannerSwitch(args.low_planner, args.high_planner, args.high_enter, args.high_exit,
+                           int(round(args.dwell / cfg.DT)))
     ctrl = controller_cls(args.planner, cfg, course, bridge, args.lidar_offset, args.tracker_dir,
                           args.grid_forward, switch)
     steps = int(round(cfg.DT / SIM_DT))
@@ -228,10 +229,12 @@ def main():
     parser.add_argument('--lidar-offset', type=float, default=0.275,
                         help='LiDAR ahead of base_link [m]; sim.yaml mounts it at 0.275')
     parser.add_argument('--tracker-dir', default=os.environ.get('MPPI_TRACKER_DIR', ''))
-    parser.add_argument('--low', default='mpc', help='hybrid: planner at low speed')
-    parser.add_argument('--high', default='mppi', help='hybrid: planner at high speed')
-    parser.add_argument('--up', type=float, default=4.0, help='hybrid: switch up at [m/s]')
-    parser.add_argument('--down', type=float, default=3.0, help='hybrid: switch down at [m/s]')
+    parser.add_argument('--low-planner', default='mpc', help='hybrid: planner at low speed')
+    parser.add_argument('--high-planner', default='mppi', help='hybrid: planner at high speed')
+    parser.add_argument('--high-enter', type=float, default=4.0,
+                        help='hybrid: enter the high-speed planner at [m/s]')
+    parser.add_argument('--high-exit', type=float, default=3.0,
+                        help='hybrid: leave the high-speed planner at [m/s]')
     parser.add_argument('--dwell', type=float, default=0.5, help='hybrid: min s between switches')
     parser.add_argument('--tag', default='', help='suffix for --out file names')
     parser.add_argument('--set', action='append', default=[], metavar='KEY=VALUE',

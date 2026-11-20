@@ -7,20 +7,21 @@ PLANNERS = ('mppi', 'mpc')
 class PlannerSwitch:
     """Pick the planner whose command is published, with hysteresis.
 
-    Starts on `low_speed`; moves to `high_speed` at or above `up_speed` and back
-    at or below `down_speed`. A switch waits `min_dwell` ticks after the last
+    Starts on `low_planner`. The high-speed band is entered at or above
+    `high_enter` (switch to `high_planner`) and left at or below `high_exit`
+    (back to `low_planner`). A switch waits `min_dwell` ticks after the last
     one so speed noise near a threshold cannot make the planners chatter.
     """
 
-    def __init__(self, low_speed, high_speed, up_speed, down_speed, min_dwell=0):
-        if low_speed not in PLANNERS or high_speed not in PLANNERS:
+    def __init__(self, low_planner, high_planner, high_enter, high_exit, min_dwell=0):
+        if low_planner not in PLANNERS or high_planner not in PLANNERS:
             raise ValueError(f'planners must be one of {PLANNERS}')
-        if down_speed > up_speed:
-            raise ValueError('switch down speed must not exceed the up speed')
+        if high_exit >= high_enter:
+            raise ValueError('high_exit speed must be below high_enter speed')
         if min_dwell < 0:
             raise ValueError('minimum dwell must be non-negative')
-        self.low_speed, self.high_speed = low_speed, high_speed
-        self.up_speed, self.down_speed, self.min_dwell = up_speed, down_speed, min_dwell
+        self.low_planner, self.high_planner = low_planner, high_planner
+        self.high_enter, self.high_exit, self.min_dwell = high_enter, high_exit, min_dwell
         self.reset()
 
     @classmethod
@@ -30,11 +31,11 @@ class PlannerSwitch:
 
     @property
     def uses(self):
-        return {self.low_speed, self.high_speed}
+        return {self.low_planner, self.high_planner}
 
     def reset(self):
         """Back to the low-speed planner, e.g. after a pose jump."""
-        self.active = self.low_speed
+        self.active = self.low_planner
         self._since_switch = self.min_dwell
 
     def select(self, speed):
@@ -46,8 +47,8 @@ class PlannerSwitch:
         return self.active
 
     def _wanted(self, speed):
-        if speed >= self.up_speed:
-            return self.high_speed
-        if speed <= self.down_speed:
-            return self.low_speed
+        if speed >= self.high_enter:
+            return self.high_planner
+        if speed <= self.high_exit:
+            return self.low_planner
         return self.active

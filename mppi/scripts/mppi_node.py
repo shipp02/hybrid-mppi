@@ -698,8 +698,8 @@ class MPPI(Node):
         self.declare_parameter('low_speed_planner', 'mpc')
         self.declare_parameter('high_speed_planner', 'mppi')
         # MPC tracks best from rest; it oscillates above ~4 m/s in the ST sim, MPPI does not
-        self.declare_parameter('switch_up_speed', 4.0)
-        self.declare_parameter('switch_down_speed', 3.0)
+        self.declare_parameter('high_enter_speed', 4.0)  # low -> high planner
+        self.declare_parameter('high_exit_speed', 3.0)  # high -> low planner
         self.declare_parameter('switch_min_dwell', 0.5)  # seconds between switches
         planner = self.get_parameter('planner').value or (
             'mppi' if self.tracker is None else 'mpc')
@@ -707,8 +707,8 @@ class MPPI(Node):
             switch = PlannerSwitch(
                 self.get_parameter('low_speed_planner').value,
                 self.get_parameter('high_speed_planner').value,
-                float(self.get_parameter('switch_up_speed').value),
-                float(self.get_parameter('switch_down_speed').value),
+                float(self.get_parameter('high_enter_speed').value),
+                float(self.get_parameter('high_exit_speed').value),
                 int(round(self.get_parameter('switch_min_dwell').value / self.config.DT)))
         elif planner in ('mppi', 'mpc'):
             switch = PlannerSwitch.fixed(planner)
