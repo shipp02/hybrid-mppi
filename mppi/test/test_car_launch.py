@@ -45,14 +45,29 @@ def load_car_launch():
 
 
 class CarLaunchTest(unittest.TestCase):
+    def test_runs_without_arguments_using_config_odometry(self):
+        arguments, launch_controller = load_car_launch()
+        self.assertEqual(arguments['odom_topic']['default_value'], '')
+        node, = launch_controller({})
+        config, overrides = node.parameters
+        self.assertNotIn('odom_topic', overrides)  # car_config.yaml supplies it
+        config_text = (LAUNCH.parents[2] / 'config' / 'car_config.yaml').read_text()
+        self.assertIn('odom_topic: /pf/pose/odom', config_text)
+
+    def test_odom_topic_argument_overrides_config(self):
+        _, launch_controller = load_car_launch()
+        node, = launch_controller({'odom_topic': '/other/odom'})
+        value, value_type = node.parameters[1]['odom_topic']
+        self.assertEqual((value.name, value_type), ('odom_topic', str))
+
     def test_planner_and_thresholds_are_overridable(self):
         arguments, launch_controller = load_car_launch()
         for name in ('planner', 'high_enter_speed', 'high_exit_speed'):
             self.assertEqual(arguments[name]['default_value'], '')
         node, = launch_controller({'planner': 'hybrid', 'high_enter_speed': '1.5',
-                                   'high_exit_speed': '1.0', 'odom_topic': '/pf/pose/odom'})
-        overrides = {name: (node.parameters[1][name][0].name, node.parameters[1][name][1])
-                     for name in ('planner', 'high_enter_speed', 'high_exit_speed')}
+                                   'high_exit_speed': '1.0'})
+        overrides = {name: (value.name, value_type)
+                     for name, (value, value_type) in node.parameters[1].items()}
         # the substitution, not its text: launch_ros converts it to value_type
         self.assertEqual(overrides['planner'], ('planner', str))
         self.assertEqual(overrides['high_enter_speed'], ('high_enter_speed', float))
@@ -60,7 +75,7 @@ class CarLaunchTest(unittest.TestCase):
 
     def test_unset_arguments_leave_config_file_values(self):
         _, launch_controller = load_car_launch()
-        node, = launch_controller({'odom_topic': '/pf/pose/odom'})
+        node, = launch_controller({})
         self.assertNotIn('planner', node.parameters[1])
         self.assertNotIn('high_enter_speed', node.parameters[1])
 
