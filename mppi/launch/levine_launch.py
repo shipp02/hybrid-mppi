@@ -23,8 +23,8 @@ PARAMETERS = {
     # acados MPC tracks the quintic spline reference (needs -DMPPI_BUILD_ACADOS=ON)
     'tracker': 'acados',
     'tracker_reference': 'spline',
-    # MPC from rest, MPPI from 4 m/s, back to MPC below 3 m/s
-    'planner': 'hybrid',
+    # MPPI plans a coarse trajectory every tick; the MPC smooths and tracks it
+    'planner': 'cascade',
     'max_speed': 6.0,
     # gym speed loop is P with gain ~4.75 accelerating, ~19 braking
     'speed_lead_time': 0.2,
