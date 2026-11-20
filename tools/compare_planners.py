@@ -75,7 +75,8 @@ class Controller:
         import mppi_node as mn
         import occupancy_grid as og
         from planner_switch import PlannerSwitch
-        self.switch = switch if planner == 'hybrid' else PlannerSwitch.fixed(planner)
+        fixed = 'mpc' if planner == 'cascade' else planner
+        self.switch = switch if planner == 'hybrid' else PlannerSwitch.fixed(fixed)
         self.mn, self.jax, self.cfg, self.course, self.planner = mn, jax, cfg, course, planner
         lidar = bridge.lidar_cfg
         self.grid = og.OccupancyGrid.create(
@@ -108,9 +109,10 @@ class Controller:
         mode = self.switch.select(x0[3])
         if mode == 'mpc':
             try:
-                action = self.tracker.solve(x0, states, controls, self.previous, reference)[0]
-            except (RuntimeError, ValueError):  # node: hybrid falls back to MPPI, mpc stops
-                action, mode = ((action, 'mppi') if self.planner == 'hybrid'
+                target = None if self.planner == 'cascade' else reference  # cascade: MPPI nominal
+                action = self.tracker.solve(x0, states, controls, self.previous, target)[0]
+            except (RuntimeError, ValueError):  # node: hybrid/cascade fall back to MPPI, mpc stops
+                action, mode = ((action, 'mppi') if self.planner in ('hybrid', 'cascade')
                                 else (np.array([self.cfg.MIN_ACCEL, 0.0]), 'stop'))
         t2 = time.perf_counter()
         self.previous = np.asarray(action, dtype=float).copy()
@@ -216,7 +218,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--track', choices=TRACKS, default='levine')
-    parser.add_argument('--planner', choices=('mppi', 'mpc', 'hybrid'), default='mppi')
+    parser.add_argument('--planner', choices=('mppi', 'mpc', 'hybrid', 'cascade'), default='mppi')
     parser.add_argument('--max-speed', type=float, default=2.0)
     parser.add_argument('--laps', type=int, default=1)
     parser.add_argument('--speed-lead', type=float, default=0.05,

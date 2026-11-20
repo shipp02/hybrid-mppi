@@ -712,8 +712,10 @@ class MPPI(Node):
                 int(round(self.get_parameter('switch_min_dwell').value / self.config.DT)))
         elif planner in ('mppi', 'mpc'):
             switch = PlannerSwitch.fixed(planner)
+        elif planner == 'cascade':  # MPPI plans coarsely, MPC smooths and tracks it
+            switch = PlannerSwitch.fixed('mpc')
         else:
-            raise ValueError('planner must be mppi, mpc or hybrid')
+            raise ValueError('planner must be mppi, mpc, hybrid or cascade')
         if 'mpc' in switch.uses and self.tracker is None:
             raise ValueError(f'planner {planner} needs tracker:=acados')
         self.planner_mode = planner
@@ -861,17 +863,21 @@ class MPPI(Node):
         return self.planner_switch.select(float(observation.x0[3]))
 
     def _planner_action(self, planner, plan, x0):
-        """[accel, steer] of the chosen planner; hybrid falls back to MPPI."""
+        """[accel, steer] of the chosen planner; hybrid and cascade fall back to MPPI.
+
+        Cascade: the MPC always tracks the MPPI nominal (target None).
+        """
         mppi_action, states, controls, reference = plan
         if planner == 'mppi':
             return mppi_action, planner
-        target = reference if self.tracker_reference == 'spline' else None
+        spline = self.tracker_reference == 'spline' and self.planner_mode != 'cascade'
+        target = reference if spline else None
         try:
             tracked = self.tracker.solve(x0, states, controls, self._last_tracker_action, target)
             return tracked[0], planner
         except (RuntimeError, ValueError) as exc:
             self.get_logger().error(f'Tracker rejected command: {exc}', throttle_duration_sec=1.0)
-        if self.planner_mode == 'hybrid':
+        if self.planner_mode in ('hybrid', 'cascade'):
             return mppi_action, 'mppi'
         return None, planner
 

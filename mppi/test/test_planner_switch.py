@@ -78,6 +78,19 @@ class NodePlannerTest(unittest.TestCase):
         np.testing.assert_array_equal(action, [1., -0.2])
         self.assertEqual(planner, 'mppi')
 
+    def test_cascade_tracks_mppi_nominal_even_with_spline_reference(self):
+        node = self.make_node('cascade', PlannerSwitch.fixed('mpc'))
+        action, planner = node._planner_action('mpc', self.plan(), np.zeros(4))
+        np.testing.assert_array_equal(action, [0.5, 0.1])
+        self.assertEqual(planner, 'mpc')
+        self.assertIsNone(node.tracker.solve.call_args.args[4])  # None: track the MPPI nominal
+
+    def test_cascade_falls_back_to_mppi_when_tracker_fails(self):
+        node = self.make_node('cascade', PlannerSwitch.fixed('mpc'), RuntimeError('solve failed'))
+        action, planner = node._planner_action('mpc', self.plan(), np.zeros(4))
+        np.testing.assert_array_equal(action, [1., -0.2])
+        self.assertEqual(planner, 'mppi')
+
     def test_fixed_mpc_stops_when_tracker_fails(self):
         node = self.make_node('mpc', PlannerSwitch.fixed('mpc'), RuntimeError('solve failed'))
         action, planner = node._planner_action('mpc', self.plan(), np.zeros(4))
