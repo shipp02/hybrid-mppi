@@ -52,7 +52,7 @@ def generate_launch_description():
         DeclareLaunchArgument('horizon', default_value=''),
         DeclareLaunchArgument('max_speed', default_value=''),
         DeclareLaunchArgument(
-            'planner', default_value='', description='Override planner: mppi, mpc or hybrid'),
+            'planner', default_value='', description='Override planner: mppi, mpc, hybrid or cascade'),
         DeclareLaunchArgument(
             'high_enter_speed', default_value='',
             description='Hybrid: speed that starts the high-speed planner [m/s]'),
