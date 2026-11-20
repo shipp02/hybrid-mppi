@@ -1,12 +1,13 @@
 """Speed-scheduled planner switch and its use in the node, no ROS needed."""
 import math
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import numpy as np
 
 from test_control_step import controller as c
 from planner_switch import PlannerSwitch
+import selected_path_publisher as spp
 
 
 class PlannerSwitchTest(unittest.TestCase):
@@ -88,6 +89,50 @@ class NodePlannerTest(unittest.TestCase):
         self.assertEqual(node._select_planner(fast), 'mppi')
         slow_after_jump = fast._replace(x0=np.array([0., 0., 0., 2.5]), reset=True)
         self.assertEqual(node._select_planner(slow_after_jump), 'mpc')
+
+
+class PlannerSideCarTest(unittest.TestCase):
+    def test_shared_planner_keeps_latest(self):
+        import multiprocessing as mp
+        shared = spp.SharedPlanner(mp.get_context('spawn'))
+        self.assertEqual(shared.snapshot(), (-1, 0))
+        shared.record('mpc')
+        shared.record('mppi')
+        self.assertEqual(shared.snapshot(), (spp.PLANNER_NAMES.index('mppi'), 2))
+        with self.assertRaises(ValueError):
+            shared.record('pid')
+
+    def test_child_publishes_only_new_updates(self):
+        import multiprocessing as mp
+        shared = spp.SharedPlanner(mp.get_context('spawn'))
+        node = Mock()
+        publication = spp.PlannerPublication(node, shared)
+        publication.publish()  # nothing recorded yet
+        shared.record('mpc')
+        publication.publish()
+        publication.publish()  # same sequence: no repeat
+        shared.record('mppi')
+        publication.publish()
+        sent = [call.args[0].data for call in publication.publisher.publish.call_args_list]
+        self.assertEqual(sent, ['mpc', 'mppi'])
+
+    def test_control_loop_hands_planner_to_side_car(self):
+        node = object.__new__(c.MPPI)
+        node.control_state, node.course, node.grid, node.config = None, None, None, c.MPPIConfig()
+        node.publish_top_paths_enabled = node.publish_selected_paths_enabled = False
+        node.planner_mode, node.planner_switch = 'mppi', PlannerSwitch.fixed('mppi')
+        node.path_publisher = Mock()
+        node._last_tracker_action = np.zeros(2)
+        for name in ('_publish_occupancy_grid', '_publish_drive', '_publish_top_paths', '_publish_stop'):
+            setattr(node, name, Mock())
+        result = Mock(action=np.array([1., 0.1]), reference=np.zeros((3, 4)), top_paths=None)
+        observation = c.ControlObservation(np.array([0., 0., 0., 1.]), None, 0.05, False)
+        with patch.object(c, 'tracking_control_step', return_value=(result, np.zeros((3, 4)))), \
+                patch.object(c.jax, 'device_get', side_effect=lambda tree: tree):
+            node._plan_and_publish(observation, Mock())
+        node.path_publisher.planner.record.assert_called_once_with('mppi')
+        node._publish_drive.assert_called_once()
+        self.assertFalse(hasattr(node, 'planner_publisher'))
 
 
 if __name__ == '__main__':

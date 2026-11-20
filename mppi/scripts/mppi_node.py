@@ -10,7 +10,6 @@ import jax.numpy as jnp
 import numpy as np
 import rclpy
 from ackermann_msgs.msg import AckermannDriveStamped
-from std_msgs.msg import String
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
 from geometry_msgs.msg import Point
@@ -565,7 +564,6 @@ class MPPI(Node):
         self.scan_subscriber = self.create_subscription(
             LaserScan, '/scan', self.scan_callback, 1,
         )
-        self.planner_publisher = self.create_publisher(String, '/mppi/planner', 10)
         self.control_timer = self.create_timer(
             self.config.DT, self.control_callback,
         )
@@ -638,9 +636,10 @@ class MPPI(Node):
                 self.config.H + 1, self.get_parameter('path_frame').value,
                 publish_history=self.publish_selected_paths_enabled,
                 publish_top_paths=self.publish_top_paths_enabled,
-                grid_settings=self._grid_settings if self.publish_occupancy_grid_enabled else None)
+                grid_settings=self._grid_settings if self.publish_occupancy_grid_enabled else None,
+                publish_planner=self.tracker is not None)
             if (self.publish_selected_paths_enabled or self.publish_top_paths_enabled
-                or self.publish_occupancy_grid_enabled) else None)
+                or self.publish_occupancy_grid_enabled or self.tracker is not None) else None)
 
         self.get_logger().info(f'MPPI initialized on {track}; waiting for LiDAR extrinsics')
 
@@ -845,7 +844,7 @@ class MPPI(Node):
         plan = jax.device_get((result.action, nominal, result.state.U, result.reference))
         planner = self._select_planner(observation)
         action, planner = self._planner_action(planner, plan, observation.x0)
-        self.planner_publisher.publish(String(data=planner))
+        self.path_publisher.planner.record(planner)
         if action is None:
             self._publish_stop(now)
             return
