@@ -179,6 +179,7 @@ def cost_components(X, U, ref, cfg, grid):
     blocked_penalty = 1e1 / (1.0 + path_dist)
     # Keep timestep costs separate: mppi_update owns horizon/cost-to-go sums.
     obs_block_cost = 10 * jnp.where(~obs_blocked, blocked_penalty, 0.0)
+    # obs_block_cost = 0.0
 
     # position error in the frame of the reference: [lag, lateral]. From rest the
     # reference runs ahead of the car, and a plain x/y error is then all lag,
@@ -715,7 +716,7 @@ class MPPI(Node):
         Assumes COM-based odometry and a centered, forward-facing sensor.
         LiDAR is 10.5 inches and estimated COM is 6.5 inches from rear axle.
         """
-        return (0.1016, 0.0, 0.0)  # 4 inches forward of COM
+        return (0.2667, 0.0, 0.0)  # 4 inches forward of COM
 
     def _ensure_grid(self, scan_frame, scan_stamp):
         """Cache rigid sensor geometry; resolve it again if either frame changes."""
