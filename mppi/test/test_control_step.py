@@ -214,7 +214,7 @@ class LaunchDeviceTest(unittest.TestCase):
     def test_car_requires_gpu_and_explicit_odometry(self):
         *arguments, node = self.load_launch('car_launch.py')
         defaults = dict(arguments)
-        self.assertNotIn('default_value', defaults['odom_topic'])
+        self.assertEqual(defaults['odom_topic']['default_value'], '')  # from car_config.yaml
         self.assertEqual(defaults['track']['default_value'], 'levine')
         self.assertEqual(defaults['use_cpu']['default_value'], 'false')
         self.assertEqual(defaults['dynamics']['default_value'], 'kinematic')

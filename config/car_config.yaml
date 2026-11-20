@@ -2,3 +2,5 @@ mppi_node:
   ros__parameters:
     track: waypoints_20261026_185546.csv
     max_speed: 2.0
+    # map-frame localization (particle filter); not /odom, which is wheel odometry
+    odom_topic: /pf/pose/odom
