@@ -44,6 +44,7 @@ install(PROGRAMS
   scripts/map_obstacle_debug.py
   scripts/utils.py
   scripts/quintic_spline.py
+  scripts/corridor.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
