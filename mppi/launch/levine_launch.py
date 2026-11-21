@@ -20,9 +20,21 @@ PARAMETERS = {
     'use_cpu': True,
     'odom_topic' : '/ego_racecar/odom',
     'publish_selected_paths': False,
-    # acados MPC tracks the quintic spline reference (needs -DMPPI_BUILD_ACADOS=ON)
+    # Hybrid MPPI-MPC (arXiv 2208.02439): MPPI plans coarsely, the acados MPC tracks
+    # the race line inside a collision-free corridor around that plan, and its
+    # smoothed controls warm-start the next MPPI step (needs -DMPPI_BUILD_ACADOS=ON)
     'tracker': 'acados',
-    'tracker_reference': 'spline',
+    'tracker_reference': 'corridor',
+    'max_speed': 6.0,
+    # plan from where the car will be when the command lands (~15 ms compute plus
+    # sim stepping); gentler MPC steering corrections are robust to that delay
+    'delay_compensation': 0.03,
+    'corridor_steer_rate_weight': 200.0,
+    # gym speed loop is P with gain ~4.75 accelerating, ~19 braking
+    'speed_lead_time': 0.2,
+    'brake_lead_time': 0.05,
+    # sim odom is base_link (rear axle); sim.yaml mounts the LiDAR 0.275 m ahead
+    'lidar_offset': 0.275,
 }
 
 
