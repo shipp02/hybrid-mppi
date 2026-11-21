@@ -31,6 +31,17 @@ class MPPIConfig:
     R: tuple = (0.01, 1.0)  # input cost [a, delta]
     Rd: tuple = (0.01, 1.0)  # input difference cost [a, delta]
     OBSTACLE_WEIGHT: float = 10.0  # scale of the blocked-cell penalty
+
+    # Hybrid MPPI-MPC (MPPI-IPDDP, arXiv 2208.02439), tracker_reference:=corridor:
+    # the MPC tracks the race line inside collision-free balls around the MPPI plan
+    CORRIDOR_R_MAX: float = 0.5  # largest ball radius [m] (paper r_max)
+    CORRIDOR_Q: float = 0.001  # MPC weight on distance from the ball center (paper Q)
+    # solver iterations per tick: the ball constraint has zero gradient at its center,
+    # where the MPPI warm start puts the first linearization
+    CORRIDOR_SQP_ITERS: int = 3
+    # MPC weight on steering change with a corridor; higher is gentler and more robust
+    # to command delay (the race-line target corrects firmly)
+    CORRIDOR_STEER_RATE_WEIGHT: float = 10.0
     # ---------------------------------------------------
 
     WB: float = 0.33  # Wheelbase [m]
@@ -63,6 +74,8 @@ class MPPIConfig:
         """Reject unusable dynamic settings before tracing any rollout."""
         import math
 
+        if self.CORRIDOR_R_MAX <= 0 or self.CORRIDOR_SQP_ITERS < 1:
+            raise ValueError('corridor r_max and solver iterations must be positive')
         if self.DYNAMICS not in ('kinematic', 'dynamic'):
             raise ValueError('dynamics must be kinematic or dynamic')
         if self.REFERENCE not in ('quintic', 'linear'):

@@ -34,6 +34,7 @@ extern "C" {
 #define casadi_s1 CASADI_PREFIX(s1)
 #define casadi_s2 CASADI_PREFIX(s2)
 #define casadi_s3 CASADI_PREFIX(s3)
+#define casadi_sq CASADI_PREFIX(sq)
 
 /* Symbol visibility in DLLs */
 #ifndef CASADI_SYMBOL_EXPORT
@@ -50,18 +51,33 @@ extern "C" {
   #endif
 #endif
 
+casadi_real casadi_sq(casadi_real x) { return x*x;}
+
 static const casadi_int casadi_s0[3] = {6, 1, 1};
 static const casadi_int casadi_s1[3] = {2, 1, 1};
 static const casadi_int casadi_s2[3] = {0, 1, 1};
-static const casadi_int casadi_s3[3] = {1, 1, 1};
+static const casadi_int casadi_s3[3] = {3, 1, 1};
 
-/* mppi_bicycle_tracker_constr_h_fun:(i0[6],i1[2],i2[0],i3[0])->(o0) */
+/* mppi_bicycle_tracker_constr_h_fun:(i0[6],i1[2],i2[0],i3[3])->(o0[2]) */
 static int casadi_f0(const casadi_real** arg, casadi_real** res, casadi_int* iw, casadi_real* w, int mem) {
-  casadi_real a0, a1;
+  casadi_real a0, a1, a2;
   a0=arg[1]? arg[1][1] : 0;
   a1=arg[0]? arg[0][5] : 0;
   a0=(a0-a1);
   if (res[0]!=0) res[0][0]=a0;
+  a0=arg[0]? arg[0][0] : 0;
+  a1=arg[3]? arg[3][0] : 0;
+  a0=(a0-a1);
+  a0=casadi_sq(a0);
+  a1=arg[0]? arg[0][1] : 0;
+  a2=arg[3]? arg[3][1] : 0;
+  a1=(a1-a2);
+  a1=casadi_sq(a1);
+  a0=(a0+a1);
+  a1=arg[3]? arg[3][2] : 0;
+  a1=casadi_sq(a1);
+  a0=(a0-a1);
+  if (res[0]!=0) res[0][1]=a0;
   return 0;
 }
 
@@ -125,14 +141,14 @@ CASADI_SYMBOL_EXPORT const casadi_int* mppi_bicycle_tracker_constr_h_fun_sparsit
     case 0: return casadi_s0;
     case 1: return casadi_s1;
     case 2: return casadi_s2;
-    case 3: return casadi_s2;
+    case 3: return casadi_s3;
     default: return 0;
   }
 }
 
 CASADI_SYMBOL_EXPORT const casadi_int* mppi_bicycle_tracker_constr_h_fun_sparsity_out(casadi_int i) {
   switch (i) {
-    case 0: return casadi_s3;
+    case 0: return casadi_s1;
     default: return 0;
   }
 }

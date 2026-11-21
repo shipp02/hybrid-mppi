@@ -48,47 +48,49 @@
 
 
 
-#include "acados_solver_ocp_mppi_bicycle_tracker_dcafb48e.h"
+#include "acados_solver_ocp_mppi_bicycle_tracker_e3ac8181.h"
 
-#define NX     OCP_MPPI_BICYCLE_TRACKER_DCAFB48E_NX
-#define NZ     OCP_MPPI_BICYCLE_TRACKER_DCAFB48E_NZ
-#define NU     OCP_MPPI_BICYCLE_TRACKER_DCAFB48E_NU
-#define NP     OCP_MPPI_BICYCLE_TRACKER_DCAFB48E_NP
-#define NP_GLOBAL     OCP_MPPI_BICYCLE_TRACKER_DCAFB48E_NP_GLOBAL
-#define NY0    OCP_MPPI_BICYCLE_TRACKER_DCAFB48E_NY0
-#define NY     OCP_MPPI_BICYCLE_TRACKER_DCAFB48E_NY
-#define NYN    OCP_MPPI_BICYCLE_TRACKER_DCAFB48E_NYN
+#define NX     OCP_MPPI_BICYCLE_TRACKER_E3AC8181_NX
+#define NZ     OCP_MPPI_BICYCLE_TRACKER_E3AC8181_NZ
+#define NU     OCP_MPPI_BICYCLE_TRACKER_E3AC8181_NU
+#define NP     OCP_MPPI_BICYCLE_TRACKER_E3AC8181_NP
+#define NP_GLOBAL     OCP_MPPI_BICYCLE_TRACKER_E3AC8181_NP_GLOBAL
+#define NY0    OCP_MPPI_BICYCLE_TRACKER_E3AC8181_NY0
+#define NY     OCP_MPPI_BICYCLE_TRACKER_E3AC8181_NY
+#define NYN    OCP_MPPI_BICYCLE_TRACKER_E3AC8181_NYN
 
-#define NBX    OCP_MPPI_BICYCLE_TRACKER_DCAFB48E_NBX
-#define NBX0   OCP_MPPI_BICYCLE_TRACKER_DCAFB48E_NBX0
-#define NBU    OCP_MPPI_BICYCLE_TRACKER_DCAFB48E_NBU
-#define NG     OCP_MPPI_BICYCLE_TRACKER_DCAFB48E_NG
-#define NBXN   OCP_MPPI_BICYCLE_TRACKER_DCAFB48E_NBXN
-#define NGN    OCP_MPPI_BICYCLE_TRACKER_DCAFB48E_NGN
+#define NBX    OCP_MPPI_BICYCLE_TRACKER_E3AC8181_NBX
+#define NBX0   OCP_MPPI_BICYCLE_TRACKER_E3AC8181_NBX0
+#define NBU    OCP_MPPI_BICYCLE_TRACKER_E3AC8181_NBU
+#define NG     OCP_MPPI_BICYCLE_TRACKER_E3AC8181_NG
+#define NBXN   OCP_MPPI_BICYCLE_TRACKER_E3AC8181_NBXN
+#define NGN    OCP_MPPI_BICYCLE_TRACKER_E3AC8181_NGN
 
-#define NH     OCP_MPPI_BICYCLE_TRACKER_DCAFB48E_NH
-#define NHN    OCP_MPPI_BICYCLE_TRACKER_DCAFB48E_NHN
-#define NH0    OCP_MPPI_BICYCLE_TRACKER_DCAFB48E_NH0
-#define NPHI   OCP_MPPI_BICYCLE_TRACKER_DCAFB48E_NPHI
-#define NPHIN  OCP_MPPI_BICYCLE_TRACKER_DCAFB48E_NPHIN
-#define NPHI0  OCP_MPPI_BICYCLE_TRACKER_DCAFB48E_NPHI0
-#define NR     OCP_MPPI_BICYCLE_TRACKER_DCAFB48E_NR
+#define NH     OCP_MPPI_BICYCLE_TRACKER_E3AC8181_NH
+#define NHN    OCP_MPPI_BICYCLE_TRACKER_E3AC8181_NHN
+#define NH0    OCP_MPPI_BICYCLE_TRACKER_E3AC8181_NH0
+#define NPHI   OCP_MPPI_BICYCLE_TRACKER_E3AC8181_NPHI
+#define NPHIN  OCP_MPPI_BICYCLE_TRACKER_E3AC8181_NPHIN
+#define NPHI0  OCP_MPPI_BICYCLE_TRACKER_E3AC8181_NPHI0
+#define NR     OCP_MPPI_BICYCLE_TRACKER_E3AC8181_NR
 
-#define NS     OCP_MPPI_BICYCLE_TRACKER_DCAFB48E_NS
-#define NS0    OCP_MPPI_BICYCLE_TRACKER_DCAFB48E_NS0
-#define NSN    OCP_MPPI_BICYCLE_TRACKER_DCAFB48E_NSN
+#define NS     OCP_MPPI_BICYCLE_TRACKER_E3AC8181_NS
+#define NS0    OCP_MPPI_BICYCLE_TRACKER_E3AC8181_NS0
+#define NSN    OCP_MPPI_BICYCLE_TRACKER_E3AC8181_NSN
 
-#define NSBX   OCP_MPPI_BICYCLE_TRACKER_DCAFB48E_NSBX
-#define NSBU   OCP_MPPI_BICYCLE_TRACKER_DCAFB48E_NSBU
-#define NSH0   OCP_MPPI_BICYCLE_TRACKER_DCAFB48E_NSH0
-#define NSH    OCP_MPPI_BICYCLE_TRACKER_DCAFB48E_NSH
-#define NSHN   OCP_MPPI_BICYCLE_TRACKER_DCAFB48E_NSHN
-#define NSG    OCP_MPPI_BICYCLE_TRACKER_DCAFB48E_NSG
-#define NSPHI0 OCP_MPPI_BICYCLE_TRACKER_DCAFB48E_NSPHI0
-#define NSPHI  OCP_MPPI_BICYCLE_TRACKER_DCAFB48E_NSPHI
-#define NSPHIN OCP_MPPI_BICYCLE_TRACKER_DCAFB48E_NSPHIN
-#define NSGN   OCP_MPPI_BICYCLE_TRACKER_DCAFB48E_NSGN
-#define NSBXN  OCP_MPPI_BICYCLE_TRACKER_DCAFB48E_NSBXN
+#define NSBX   OCP_MPPI_BICYCLE_TRACKER_E3AC8181_NSBX
+#define NSBU   OCP_MPPI_BICYCLE_TRACKER_E3AC8181_NSBU
+#define NSH0   OCP_MPPI_BICYCLE_TRACKER_E3AC8181_NSH0
+#define NSH    OCP_MPPI_BICYCLE_TRACKER_E3AC8181_NSH
+#define NSHN   OCP_MPPI_BICYCLE_TRACKER_E3AC8181_NSHN
+#define NSG    OCP_MPPI_BICYCLE_TRACKER_E3AC8181_NSG
+#define NSPHI0 OCP_MPPI_BICYCLE_TRACKER_E3AC8181_NSPHI0
+#define NSPHI  OCP_MPPI_BICYCLE_TRACKER_E3AC8181_NSPHI
+#define NSPHIN OCP_MPPI_BICYCLE_TRACKER_E3AC8181_NSPHIN
+#define NSGN   OCP_MPPI_BICYCLE_TRACKER_E3AC8181_NSGN
+#define NSBXN  OCP_MPPI_BICYCLE_TRACKER_E3AC8181_NSBXN
+// initial value of stagewise parameters
+static const double p_init[] = {0,0,10,};
 
 
 
@@ -96,35 +98,35 @@
 
 // ** solver data **
 
-ocp_mppi_bicycle_tracker_dcafb48e_solver_capsule * ocp_mppi_bicycle_tracker_dcafb48e_acados_create_capsule(void)
+ocp_mppi_bicycle_tracker_e3ac8181_solver_capsule * ocp_mppi_bicycle_tracker_e3ac8181_acados_create_capsule(void)
 {
-    void* capsule_mem = malloc(sizeof(ocp_mppi_bicycle_tracker_dcafb48e_solver_capsule));
-    ocp_mppi_bicycle_tracker_dcafb48e_solver_capsule *capsule = (ocp_mppi_bicycle_tracker_dcafb48e_solver_capsule *) capsule_mem;
+    void* capsule_mem = malloc(sizeof(ocp_mppi_bicycle_tracker_e3ac8181_solver_capsule));
+    ocp_mppi_bicycle_tracker_e3ac8181_solver_capsule *capsule = (ocp_mppi_bicycle_tracker_e3ac8181_solver_capsule *) capsule_mem;
 
     return capsule;
 }
 
 
-int ocp_mppi_bicycle_tracker_dcafb48e_acados_free_capsule(ocp_mppi_bicycle_tracker_dcafb48e_solver_capsule *capsule)
+int ocp_mppi_bicycle_tracker_e3ac8181_acados_free_capsule(ocp_mppi_bicycle_tracker_e3ac8181_solver_capsule *capsule)
 {
     free(capsule);
     return 0;
 }
 
 
-int ocp_mppi_bicycle_tracker_dcafb48e_acados_create(ocp_mppi_bicycle_tracker_dcafb48e_solver_capsule* capsule)
+int ocp_mppi_bicycle_tracker_e3ac8181_acados_create(ocp_mppi_bicycle_tracker_e3ac8181_solver_capsule* capsule)
 {
-    int N_shooting_intervals = OCP_MPPI_BICYCLE_TRACKER_DCAFB48E_N;
+    int N_shooting_intervals = OCP_MPPI_BICYCLE_TRACKER_E3AC8181_N;
     double* new_time_steps = NULL; // NULL -> don't alter the code generated time-steps
-    return ocp_mppi_bicycle_tracker_dcafb48e_acados_create_with_discretization(capsule, N_shooting_intervals, new_time_steps);
+    return ocp_mppi_bicycle_tracker_e3ac8181_acados_create_with_discretization(capsule, N_shooting_intervals, new_time_steps);
 }
 
 
-int ocp_mppi_bicycle_tracker_dcafb48e_acados_update_time_steps(ocp_mppi_bicycle_tracker_dcafb48e_solver_capsule* capsule, int N, double* new_time_steps)
+int ocp_mppi_bicycle_tracker_e3ac8181_acados_update_time_steps(ocp_mppi_bicycle_tracker_e3ac8181_solver_capsule* capsule, int N, double* new_time_steps)
 {
 
     if (N != capsule->nlp_solver_plan->N) {
-        fprintf(stderr, "ocp_mppi_bicycle_tracker_dcafb48e_acados_update_time_steps: given number of time steps (= %d) " \
+        fprintf(stderr, "ocp_mppi_bicycle_tracker_e3ac8181_acados_update_time_steps: given number of time steps (= %d) " \
             "differs from the currently allocated number of " \
             "time steps (= %d)!\n" \
             "Please recreate with new discretization and provide a new vector of time_stamps!\n",
@@ -146,9 +148,9 @@ int ocp_mppi_bicycle_tracker_dcafb48e_acados_update_time_steps(ocp_mppi_bicycle_
 }
 
 /**
- * Internal function for ocp_mppi_bicycle_tracker_dcafb48e_acados_create: step 1
+ * Internal function for ocp_mppi_bicycle_tracker_e3ac8181_acados_create: step 1
  */
-void ocp_mppi_bicycle_tracker_dcafb48e_acados_create_set_plan(ocp_nlp_plan_t* nlp_solver_plan, const int N)
+void ocp_mppi_bicycle_tracker_e3ac8181_acados_create_set_plan(ocp_nlp_plan_t* nlp_solver_plan, const int N)
 {
     assert(N == nlp_solver_plan->N);
 
@@ -187,7 +189,7 @@ void ocp_mppi_bicycle_tracker_dcafb48e_acados_create_set_plan(ocp_nlp_plan_t* nl
 }
 
 
-static ocp_nlp_dims* ocp_mppi_bicycle_tracker_dcafb48e_acados_create_setup_dimensions(ocp_mppi_bicycle_tracker_dcafb48e_solver_capsule* capsule)
+static ocp_nlp_dims* ocp_mppi_bicycle_tracker_e3ac8181_acados_create_setup_dimensions(ocp_mppi_bicycle_tracker_e3ac8181_solver_capsule* capsule)
 {
     ocp_nlp_plan_t* nlp_solver_plan = capsule->nlp_solver_plan;
     const int N = nlp_solver_plan->N;
@@ -320,9 +322,9 @@ static ocp_nlp_dims* ocp_mppi_bicycle_tracker_dcafb48e_acados_create_setup_dimen
 
 
 /**
- * Internal function for ocp_mppi_bicycle_tracker_dcafb48e_acados_create: step 3
+ * Internal function for ocp_mppi_bicycle_tracker_e3ac8181_acados_create: step 3
  */
-void ocp_mppi_bicycle_tracker_dcafb48e_acados_create_setup_functions(ocp_mppi_bicycle_tracker_dcafb48e_solver_capsule* capsule)
+void ocp_mppi_bicycle_tracker_e3ac8181_acados_create_setup_functions(ocp_mppi_bicycle_tracker_e3ac8181_solver_capsule* capsule)
 {
     const int N = capsule->nlp_solver_plan->N;
 
@@ -397,6 +399,11 @@ void ocp_mppi_bicycle_tracker_dcafb48e_acados_create_setup_functions(ocp_mppi_bi
             MAP_CASADI_FNC(cost_y_fun_jac_ut_xt[i], mppi_bicycle_tracker_cost_y_fun_jac_ut_xt);
         }
     } // N > 0
+    MAP_CASADI_FNC(nl_constr_h_e_fun_jac, mppi_bicycle_tracker_constr_h_e_fun_jac_uxt_zt);
+    MAP_CASADI_FNC(nl_constr_h_e_fun, mppi_bicycle_tracker_constr_h_e_fun);
+
+
+
     // nonlinear least square function
     MAP_CASADI_FNC(cost_y_e_fun, mppi_bicycle_tracker_cost_y_e_fun);
     MAP_CASADI_FNC(cost_y_e_fun_jac_ut_xt, mppi_bicycle_tracker_cost_y_e_fun_jac_ut_xt);
@@ -406,12 +413,22 @@ void ocp_mppi_bicycle_tracker_dcafb48e_acados_create_setup_functions(ocp_mppi_bi
 
 
 /**
- * Internal function for ocp_mppi_bicycle_tracker_dcafb48e_acados_create: step 5
+ * Internal function for ocp_mppi_bicycle_tracker_e3ac8181_acados_create: step 5
  */
-void ocp_mppi_bicycle_tracker_dcafb48e_acados_create_set_default_parameters(ocp_mppi_bicycle_tracker_dcafb48e_solver_capsule* capsule)
+void ocp_mppi_bicycle_tracker_e3ac8181_acados_create_set_default_parameters(ocp_mppi_bicycle_tracker_e3ac8181_solver_capsule* capsule)
 {
 
-    // no parameters defined
+    const int N = capsule->nlp_solver_plan->N;
+
+    // initialize parameters to initial value
+
+    double* p = malloc(NP*sizeof(double));
+    memcpy(p, p_init, NP*sizeof(double));
+
+    for (int i = 0; i <= N; i++) {
+        ocp_mppi_bicycle_tracker_e3ac8181_acados_update_params(capsule, i, p, NP);
+    }
+    free(p);
 
 
     // no global parameters defined
@@ -419,9 +436,9 @@ void ocp_mppi_bicycle_tracker_dcafb48e_acados_create_set_default_parameters(ocp_
 
 
 /**
- * Internal function for ocp_mppi_bicycle_tracker_dcafb48e_acados_create: step 5
+ * Internal function for ocp_mppi_bicycle_tracker_e3ac8181_acados_create: step 5
  */
-void ocp_mppi_bicycle_tracker_dcafb48e_acados_create_setup_nlp_in_numerical_values(ocp_mppi_bicycle_tracker_dcafb48e_solver_capsule* capsule, const int N, double* new_time_steps)
+void ocp_mppi_bicycle_tracker_e3ac8181_acados_create_setup_nlp_in_numerical_values(ocp_mppi_bicycle_tracker_e3ac8181_solver_capsule* capsule, const int N, double* new_time_steps)
 {
     assert(N == capsule->nlp_solver_plan->N);
     ocp_nlp_config* nlp_config = capsule->nlp_config;
@@ -443,7 +460,7 @@ void ocp_mppi_bicycle_tracker_dcafb48e_acados_create_setup_nlp_in_numerical_valu
     if (new_time_steps)
     {
         // NOTE: this sets scaling and time_steps
-        ocp_mppi_bicycle_tracker_dcafb48e_acados_update_time_steps(capsule, N, new_time_steps);
+        ocp_mppi_bicycle_tracker_e3ac8181_acados_update_time_steps(capsule, N, new_time_steps);
     }
     else
     {
@@ -564,8 +581,46 @@ void ocp_mppi_bicycle_tracker_dcafb48e_acados_create_setup_nlp_in_numerical_valu
 
 
 
+    // slacks
+    double* zlumem = calloc(4*NS, sizeof(double));
+    double* Zl = zlumem+NS*0;
+    double* Zu = zlumem+NS*1;
+    double* zl = zlumem+NS*2;
+    double* zu = zlumem+NS*3;
+    // change only the non-zero elements:
+    Zl[0] = 10000;
+    Zu[0] = 10000;
+    zl[0] = 100;
+    zu[0] = 100;
+
+    for (int i = 1; i < N; i++)
+    {
+        ocp_nlp_cost_model_set(nlp_config, nlp_dims, nlp_in, i, "Zl", Zl);
+        ocp_nlp_cost_model_set(nlp_config, nlp_dims, nlp_in, i, "Zu", Zu);
+        ocp_nlp_cost_model_set(nlp_config, nlp_dims, nlp_in, i, "zl", zl);
+        ocp_nlp_cost_model_set(nlp_config, nlp_dims, nlp_in, i, "zu", zu);
+    }
+    free(zlumem);
 
 
+    // slacks terminal
+    double* zluemem = calloc(4*NSN, sizeof(double));
+    double* Zl_e = zluemem+NSN*0;
+    double* Zu_e = zluemem+NSN*1;
+    double* zl_e = zluemem+NSN*2;
+    double* zu_e = zluemem+NSN*3;
+
+    // change only the non-zero elements:
+    Zl_e[0] = 10000;
+    Zu_e[0] = 10000;
+    zl_e[0] = 100;
+    zu_e[0] = 100;
+
+    ocp_nlp_cost_model_set(nlp_config, nlp_dims, nlp_in, N, "Zl", Zl_e);
+    ocp_nlp_cost_model_set(nlp_config, nlp_dims, nlp_in, N, "Zu", Zu_e);
+    ocp_nlp_cost_model_set(nlp_config, nlp_dims, nlp_in, N, "zl", zl_e);
+    ocp_nlp_cost_model_set(nlp_config, nlp_dims, nlp_in, N, "zu", zu_e);
+    free(zluemem);
 
     /**** Constraints ****/
 
@@ -673,6 +728,7 @@ void ocp_mppi_bicycle_tracker_dcafb48e_acados_create_setup_nlp_in_numerical_valu
     double* lh = luh;
     double* uh = luh + NH;
     lh[0] = -0.15707963267948966;
+    lh[1] = -150;
     uh[0] = 0.15707963267948966;
 
     for (int i = 1; i < N; i++)
@@ -689,6 +745,21 @@ void ocp_mppi_bicycle_tracker_dcafb48e_acados_create_setup_nlp_in_numerical_valu
 
 
 
+    // set up soft bounds for nonlinear constraints
+    int* idxsh = malloc(NSH * sizeof(int));
+    idxsh[0] = 1;
+    double* lush = calloc(2*NSH, sizeof(double));
+    double* lsh = lush;
+    double* ush = lush + NSH;
+
+    for (int i = 1; i < N; i++)
+    {
+        ocp_nlp_constraints_model_set(nlp_config, nlp_dims, nlp_in, nlp_out, i, "idxsh", idxsh);
+        ocp_nlp_constraints_model_set(nlp_config, nlp_dims, nlp_in, nlp_out, i, "lsh", lsh);
+        ocp_nlp_constraints_model_set(nlp_config, nlp_dims, nlp_in, nlp_out, i, "ush", ush);
+    }
+    free(idxsh);
+    free(lush);
 
 
 
@@ -711,6 +782,19 @@ void ocp_mppi_bicycle_tracker_dcafb48e_acados_create_setup_nlp_in_numerical_valu
 
 
 
+    // set up nonlinear constraints for last stage
+    double* luh_e = calloc(2*NHN, sizeof(double));
+    double* lh_e = luh_e;
+    double* uh_e = luh_e + NHN;
+    lh_e[0] = -150;
+
+    ocp_nlp_constraints_model_set(nlp_config, nlp_dims, nlp_in, nlp_out, N, "lh", lh_e);
+    ocp_nlp_constraints_model_set(nlp_config, nlp_dims, nlp_in, nlp_out, N, "uh", uh_e);
+    free(luh_e);
+
+
+
+    /* terminal soft constraints */
 
 
 
@@ -719,8 +803,18 @@ void ocp_mppi_bicycle_tracker_dcafb48e_acados_create_setup_nlp_in_numerical_valu
 
 
 
+    // set up soft bounds for nonlinear constraints
+    int* idxsh_e = malloc(NSHN * sizeof(int));
+    idxsh_e[0] = 0;
+    double* lush_e = calloc(2*NSHN, sizeof(double));
+    double* lsh_e = lush_e;
+    double* ush_e = lush_e + NSHN;
 
-
+    ocp_nlp_constraints_model_set(nlp_config, nlp_dims, nlp_in, nlp_out, N, "idxsh", idxsh_e);
+    ocp_nlp_constraints_model_set(nlp_config, nlp_dims, nlp_in, nlp_out, N, "lsh", lsh_e);
+    ocp_nlp_constraints_model_set(nlp_config, nlp_dims, nlp_in, nlp_out, N, "ush", ush_e);
+    free(idxsh_e);
+    free(lush_e);
 
 
 
@@ -728,8 +822,8 @@ void ocp_mppi_bicycle_tracker_dcafb48e_acados_create_setup_nlp_in_numerical_valu
 
 }
 
-// this function only sets external functions, numerical values are set in ocp_mppi_bicycle_tracker_dcafb48e_acados_create_setup_nlp_in_numerical_values
-void ocp_mppi_bicycle_tracker_dcafb48e_acados_create_setup_nlp_in(ocp_mppi_bicycle_tracker_dcafb48e_solver_capsule* capsule, const int N)
+// this function only sets external functions, numerical values are set in ocp_mppi_bicycle_tracker_e3ac8181_acados_create_setup_nlp_in_numerical_values
+void ocp_mppi_bicycle_tracker_e3ac8181_acados_create_setup_nlp_in(ocp_mppi_bicycle_tracker_e3ac8181_solver_capsule* capsule, const int N)
 {
     assert(N == capsule->nlp_solver_plan->N);
     ocp_nlp_config* nlp_config = capsule->nlp_config;
@@ -796,10 +890,18 @@ void ocp_mppi_bicycle_tracker_dcafb48e_acados_create_setup_nlp_in(ocp_mppi_bicyc
 
 
     /* terminal constraints */
-}
+
+    // set up nonlinear constraints for last stage
+
+    ocp_nlp_constraints_model_set_external_param_fun(nlp_config, nlp_dims, nlp_in, N, "nl_constr_h_fun_jac", &capsule->nl_constr_h_e_fun_jac);
+    ocp_nlp_constraints_model_set_external_param_fun(nlp_config, nlp_dims, nlp_in, N, "nl_constr_h_fun", &capsule->nl_constr_h_e_fun);
 
 
-static void ocp_mppi_bicycle_tracker_dcafb48e_acados_create_set_opts(ocp_mppi_bicycle_tracker_dcafb48e_solver_capsule* capsule)
+
+    }
+
+
+static void ocp_mppi_bicycle_tracker_e3ac8181_acados_create_set_opts(ocp_mppi_bicycle_tracker_e3ac8181_solver_capsule* capsule)
 {
     const int N = capsule->nlp_solver_plan->N;
     ocp_nlp_config* nlp_config = capsule->nlp_config;
@@ -896,9 +998,9 @@ static void ocp_mppi_bicycle_tracker_dcafb48e_acados_create_set_opts(ocp_mppi_bi
 
 
 /**
- * Internal function for ocp_mppi_bicycle_tracker_dcafb48e_acados_create: step 7
+ * Internal function for ocp_mppi_bicycle_tracker_e3ac8181_acados_create: step 7
  */
-void ocp_mppi_bicycle_tracker_dcafb48e_acados_set_nlp_out(ocp_mppi_bicycle_tracker_dcafb48e_solver_capsule* capsule)
+void ocp_mppi_bicycle_tracker_e3ac8181_acados_set_nlp_out(ocp_mppi_bicycle_tracker_e3ac8181_solver_capsule* capsule)
 {
     const int N = capsule->nlp_solver_plan->N;
     ocp_nlp_config* nlp_config = capsule->nlp_config;
@@ -928,9 +1030,9 @@ void ocp_mppi_bicycle_tracker_dcafb48e_acados_set_nlp_out(ocp_mppi_bicycle_track
 
 
 /**
- * Internal function for ocp_mppi_bicycle_tracker_dcafb48e_acados_create: step 9
+ * Internal function for ocp_mppi_bicycle_tracker_e3ac8181_acados_create: step 9
  */
-int ocp_mppi_bicycle_tracker_dcafb48e_acados_create_precompute(ocp_mppi_bicycle_tracker_dcafb48e_solver_capsule* capsule) {
+int ocp_mppi_bicycle_tracker_e3ac8181_acados_create_precompute(ocp_mppi_bicycle_tracker_e3ac8181_solver_capsule* capsule) {
     int status = ocp_nlp_precompute(capsule->nlp_solver, capsule->nlp_in, capsule->nlp_out);
 
     if (status != ACADOS_SUCCESS) {
@@ -942,14 +1044,14 @@ int ocp_mppi_bicycle_tracker_dcafb48e_acados_create_precompute(ocp_mppi_bicycle_
 }
 
 
-int ocp_mppi_bicycle_tracker_dcafb48e_acados_create_with_discretization(ocp_mppi_bicycle_tracker_dcafb48e_solver_capsule* capsule, int N, double* new_time_steps)
+int ocp_mppi_bicycle_tracker_e3ac8181_acados_create_with_discretization(ocp_mppi_bicycle_tracker_e3ac8181_solver_capsule* capsule, int N, double* new_time_steps)
 {
     // If N does not match the number of shooting intervals used for code generation, new_time_steps must be given.
-    if (N != OCP_MPPI_BICYCLE_TRACKER_DCAFB48E_N && !new_time_steps) {
-        fprintf(stderr, "ocp_mppi_bicycle_tracker_dcafb48e_acados_create_with_discretization: new_time_steps is NULL " \
+    if (N != OCP_MPPI_BICYCLE_TRACKER_E3AC8181_N && !new_time_steps) {
+        fprintf(stderr, "ocp_mppi_bicycle_tracker_e3ac8181_acados_create_with_discretization: new_time_steps is NULL " \
             "but the number of shooting intervals (= %d) differs from the number of " \
             "shooting intervals (= %d) during code generation! Please provide a new vector of time_stamps!\n", \
-             N, OCP_MPPI_BICYCLE_TRACKER_DCAFB48E_N);
+             N, OCP_MPPI_BICYCLE_TRACKER_E3AC8181_N);
         return 1;
     }
 
@@ -958,38 +1060,38 @@ int ocp_mppi_bicycle_tracker_dcafb48e_acados_create_with_discretization(ocp_mppi
 
     // 1) create and set nlp_solver_plan; create nlp_config
     capsule->nlp_solver_plan = ocp_nlp_plan_create(N);
-    ocp_mppi_bicycle_tracker_dcafb48e_acados_create_set_plan(capsule->nlp_solver_plan, N);
+    ocp_mppi_bicycle_tracker_e3ac8181_acados_create_set_plan(capsule->nlp_solver_plan, N);
     capsule->nlp_config = ocp_nlp_config_create(*capsule->nlp_solver_plan);
 
     // 2) create and set dimensions
-    capsule->nlp_dims = ocp_mppi_bicycle_tracker_dcafb48e_acados_create_setup_dimensions(capsule);
+    capsule->nlp_dims = ocp_mppi_bicycle_tracker_e3ac8181_acados_create_setup_dimensions(capsule);
 
     // 3) create and set nlp_opts
     capsule->nlp_opts = ocp_nlp_solver_opts_create(capsule->nlp_config, capsule->nlp_dims);
-    ocp_mppi_bicycle_tracker_dcafb48e_acados_create_set_opts(capsule);
+    ocp_mppi_bicycle_tracker_e3ac8181_acados_create_set_opts(capsule);
 
     // 4) create and set nlp_out
     // 4.1) nlp_out
     capsule->nlp_out = ocp_nlp_out_create(capsule->nlp_config, capsule->nlp_dims);
     // 4.2) sens_out
     capsule->sens_out = ocp_nlp_out_create(capsule->nlp_config, capsule->nlp_dims);
-    ocp_mppi_bicycle_tracker_dcafb48e_acados_set_nlp_out(capsule);
+    ocp_mppi_bicycle_tracker_e3ac8181_acados_set_nlp_out(capsule);
 
     // 5) create nlp_in
     capsule->nlp_in = ocp_nlp_in_create(capsule->nlp_config, capsule->nlp_dims);
 
     // 6) setup functions, nlp_in and default parameters
-    ocp_mppi_bicycle_tracker_dcafb48e_acados_create_setup_functions(capsule);
-    ocp_mppi_bicycle_tracker_dcafb48e_acados_create_setup_nlp_in(capsule, N);
-    ocp_mppi_bicycle_tracker_dcafb48e_acados_create_setup_nlp_in_numerical_values(capsule, N, new_time_steps);
-    ocp_mppi_bicycle_tracker_dcafb48e_acados_create_set_default_parameters(capsule);
+    ocp_mppi_bicycle_tracker_e3ac8181_acados_create_setup_functions(capsule);
+    ocp_mppi_bicycle_tracker_e3ac8181_acados_create_setup_nlp_in(capsule, N);
+    ocp_mppi_bicycle_tracker_e3ac8181_acados_create_setup_nlp_in_numerical_values(capsule, N, new_time_steps);
+    ocp_mppi_bicycle_tracker_e3ac8181_acados_create_set_default_parameters(capsule);
 
     // 7) create solver
     capsule->nlp_solver = ocp_nlp_solver_create(capsule->nlp_config, capsule->nlp_dims, capsule->nlp_opts, capsule->nlp_in);
 
 
     // 8) do precomputations
-    int status = ocp_mppi_bicycle_tracker_dcafb48e_acados_create_precompute(capsule);
+    int status = ocp_mppi_bicycle_tracker_e3ac8181_acados_create_precompute(capsule);
 
     return status;
 }
@@ -997,7 +1099,7 @@ int ocp_mppi_bicycle_tracker_dcafb48e_acados_create_with_discretization(ocp_mppi
 /**
  * This function is for updating an already initialized solver with a different number of qp_cond_N. It is useful for code reuse after code export.
  */
-int ocp_mppi_bicycle_tracker_dcafb48e_acados_update_qp_solver_cond_N(ocp_mppi_bicycle_tracker_dcafb48e_solver_capsule* capsule, int qp_solver_cond_N)
+int ocp_mppi_bicycle_tracker_e3ac8181_acados_update_qp_solver_cond_N(ocp_mppi_bicycle_tracker_e3ac8181_solver_capsule* capsule, int qp_solver_cond_N)
 {
     // 1) destroy solver
     ocp_nlp_solver_destroy(capsule->nlp_solver);
@@ -1008,17 +1110,17 @@ int ocp_mppi_bicycle_tracker_dcafb48e_acados_update_qp_solver_cond_N(ocp_mppi_bi
         printf("Warning: qp_solver_cond_N = %d > N = %d\n", qp_solver_cond_N, N);
     ocp_nlp_solver_opts_set(capsule->nlp_config, capsule->nlp_opts, "qp_cond_N", &qp_solver_cond_N);
 
-    // 3) continue with the remaining steps from ocp_mppi_bicycle_tracker_dcafb48e_acados_create_with_discretization(...):
+    // 3) continue with the remaining steps from ocp_mppi_bicycle_tracker_e3ac8181_acados_create_with_discretization(...):
     // -> 8) create solver
     capsule->nlp_solver = ocp_nlp_solver_create(capsule->nlp_config, capsule->nlp_dims, capsule->nlp_opts, capsule->nlp_in);
 
     // -> 9) do precomputations
-    int status = ocp_mppi_bicycle_tracker_dcafb48e_acados_create_precompute(capsule);
+    int status = ocp_mppi_bicycle_tracker_e3ac8181_acados_create_precompute(capsule);
     return status;
 }
 
 
-int ocp_mppi_bicycle_tracker_dcafb48e_acados_reset(ocp_mppi_bicycle_tracker_dcafb48e_solver_capsule* capsule, int reset_qp_solver_mem, int reset_numerical_values, int reset_solver_options, int reset_x_to_x0_bar)
+int ocp_mppi_bicycle_tracker_e3ac8181_acados_reset(ocp_mppi_bicycle_tracker_e3ac8181_solver_capsule* capsule, int reset_qp_solver_mem, int reset_numerical_values, int reset_solver_options, int reset_x_to_x0_bar)
 {
     // set initialization to all zeros
     const int N = capsule->nlp_solver_plan->N;
@@ -1045,16 +1147,16 @@ int ocp_mppi_bicycle_tracker_dcafb48e_acados_reset(ocp_mppi_bicycle_tracker_dcaf
     if (reset_numerical_values)
     {
         // reset parameters to initial values
-        ocp_mppi_bicycle_tracker_dcafb48e_acados_create_set_default_parameters(capsule);
+        ocp_mppi_bicycle_tracker_e3ac8181_acados_create_set_default_parameters(capsule);
 
         // reset numerical values in nlp_in
-        ocp_mppi_bicycle_tracker_dcafb48e_acados_create_setup_nlp_in_numerical_values(capsule, N, NULL);
+        ocp_mppi_bicycle_tracker_e3ac8181_acados_create_setup_nlp_in_numerical_values(capsule, N, NULL);
     }
 
     if (reset_solver_options)
     {
         // reset solver options to initial values
-        ocp_mppi_bicycle_tracker_dcafb48e_acados_create_set_opts(capsule);
+        ocp_mppi_bicycle_tracker_e3ac8181_acados_create_set_opts(capsule);
     }
 
     if (reset_x_to_x0_bar)
@@ -1072,11 +1174,11 @@ int ocp_mppi_bicycle_tracker_dcafb48e_acados_reset(ocp_mppi_bicycle_tracker_dcaf
 
 
 
-int ocp_mppi_bicycle_tracker_dcafb48e_acados_update_params(ocp_mppi_bicycle_tracker_dcafb48e_solver_capsule* capsule, int stage, double *p, int np)
+int ocp_mppi_bicycle_tracker_e3ac8181_acados_update_params(ocp_mppi_bicycle_tracker_e3ac8181_solver_capsule* capsule, int stage, double *p, int np)
 {
     int solver_status = 0;
 
-    int casadi_np = 0;
+    int casadi_np = 3;
     if (casadi_np != np) {
         printf("acados_update_params: trying to set %i parameters for external functions."
             " External function has %i parameters. Exiting.\n", np, casadi_np);
@@ -1088,7 +1190,7 @@ int ocp_mppi_bicycle_tracker_dcafb48e_acados_update_params(ocp_mppi_bicycle_trac
 }
 
 
-int ocp_mppi_bicycle_tracker_dcafb48e_acados_update_params_sparse(ocp_mppi_bicycle_tracker_dcafb48e_solver_capsule * capsule, int stage, int *idx, double *p, int n_update)
+int ocp_mppi_bicycle_tracker_e3ac8181_acados_update_params_sparse(ocp_mppi_bicycle_tracker_e3ac8181_solver_capsule * capsule, int stage, int *idx, double *p, int n_update)
 {
     ocp_nlp_in_set_params_sparse(capsule->nlp_config, capsule->nlp_dims, capsule->nlp_in, stage, idx, p, n_update);
 
@@ -1096,17 +1198,17 @@ int ocp_mppi_bicycle_tracker_dcafb48e_acados_update_params_sparse(ocp_mppi_bicyc
 }
 
 
-int ocp_mppi_bicycle_tracker_dcafb48e_acados_set_p_global_and_precompute_dependencies(ocp_mppi_bicycle_tracker_dcafb48e_solver_capsule* capsule, double* data, int data_len)
+int ocp_mppi_bicycle_tracker_e3ac8181_acados_set_p_global_and_precompute_dependencies(ocp_mppi_bicycle_tracker_e3ac8181_solver_capsule* capsule, double* data, int data_len)
 {
 
-    // printf("No global_data, ocp_mppi_bicycle_tracker_dcafb48e_acados_set_p_global_and_precompute_dependencies does nothing.\n");
+    // printf("No global_data, ocp_mppi_bicycle_tracker_e3ac8181_acados_set_p_global_and_precompute_dependencies does nothing.\n");
     return 0;
 }
 
 
 
 
-int ocp_mppi_bicycle_tracker_dcafb48e_acados_solve(ocp_mppi_bicycle_tracker_dcafb48e_solver_capsule* capsule)
+int ocp_mppi_bicycle_tracker_e3ac8181_acados_solve(ocp_mppi_bicycle_tracker_e3ac8181_solver_capsule* capsule)
 {
     // solve NLP
     int solver_status = ocp_nlp_solve(capsule->nlp_solver, capsule->nlp_in, capsule->nlp_out);
@@ -1116,7 +1218,7 @@ int ocp_mppi_bicycle_tracker_dcafb48e_acados_solve(ocp_mppi_bicycle_tracker_dcaf
 
 
 
-int ocp_mppi_bicycle_tracker_dcafb48e_acados_setup_qp_matrices_and_factorize(ocp_mppi_bicycle_tracker_dcafb48e_solver_capsule* capsule)
+int ocp_mppi_bicycle_tracker_e3ac8181_acados_setup_qp_matrices_and_factorize(ocp_mppi_bicycle_tracker_e3ac8181_solver_capsule* capsule)
 {
     int solver_status = ocp_nlp_setup_qp_matrices_and_factorize(capsule->nlp_solver, capsule->nlp_in, capsule->nlp_out);
 
@@ -1128,7 +1230,7 @@ int ocp_mppi_bicycle_tracker_dcafb48e_acados_setup_qp_matrices_and_factorize(ocp
 
 
 
-int ocp_mppi_bicycle_tracker_dcafb48e_acados_free(ocp_mppi_bicycle_tracker_dcafb48e_solver_capsule* capsule)
+int ocp_mppi_bicycle_tracker_e3ac8181_acados_free(ocp_mppi_bicycle_tracker_e3ac8181_solver_capsule* capsule)
 {
     // before destroying, keep some info
     const int N = capsule->nlp_solver_plan->N;
@@ -1182,6 +1284,8 @@ int ocp_mppi_bicycle_tracker_dcafb48e_acados_free(ocp_mppi_bicycle_tracker_dcafb
     free(capsule->nl_constr_h_fun);
     external_function_external_param_casadi_free(&capsule->nl_constr_h_0_fun_jac);
     external_function_external_param_casadi_free(&capsule->nl_constr_h_0_fun);
+    external_function_external_param_casadi_free(&capsule->nl_constr_h_e_fun_jac);
+    external_function_external_param_casadi_free(&capsule->nl_constr_h_e_fun);
 
 
 
@@ -1189,7 +1293,7 @@ int ocp_mppi_bicycle_tracker_dcafb48e_acados_free(ocp_mppi_bicycle_tracker_dcafb
 }
 
 
-void ocp_mppi_bicycle_tracker_dcafb48e_acados_print_stats(ocp_mppi_bicycle_tracker_dcafb48e_solver_capsule* capsule)
+void ocp_mppi_bicycle_tracker_e3ac8181_acados_print_stats(ocp_mppi_bicycle_tracker_e3ac8181_solver_capsule* capsule)
 {
     int nlp_iter, stat_m, stat_n, tmp_int;
     ocp_nlp_get(capsule->nlp_solver, "nlp_iter", &nlp_iter);
@@ -1221,7 +1325,7 @@ void ocp_mppi_bicycle_tracker_dcafb48e_acados_print_stats(ocp_mppi_bicycle_track
     }
 }
 
-int ocp_mppi_bicycle_tracker_dcafb48e_acados_custom_update(ocp_mppi_bicycle_tracker_dcafb48e_solver_capsule* capsule, double* data, int data_len)
+int ocp_mppi_bicycle_tracker_e3ac8181_acados_custom_update(ocp_mppi_bicycle_tracker_e3ac8181_solver_capsule* capsule, double* data, int data_len)
 {
     (void)capsule;
     (void)data;
@@ -1234,11 +1338,11 @@ int ocp_mppi_bicycle_tracker_dcafb48e_acados_custom_update(ocp_mppi_bicycle_trac
 
 
 
-ocp_nlp_in *ocp_mppi_bicycle_tracker_dcafb48e_acados_get_nlp_in(ocp_mppi_bicycle_tracker_dcafb48e_solver_capsule* capsule) { return capsule->nlp_in; }
-ocp_nlp_out *ocp_mppi_bicycle_tracker_dcafb48e_acados_get_nlp_out(ocp_mppi_bicycle_tracker_dcafb48e_solver_capsule* capsule) { return capsule->nlp_out; }
-ocp_nlp_out *ocp_mppi_bicycle_tracker_dcafb48e_acados_get_sens_out(ocp_mppi_bicycle_tracker_dcafb48e_solver_capsule* capsule) { return capsule->sens_out; }
-ocp_nlp_solver *ocp_mppi_bicycle_tracker_dcafb48e_acados_get_nlp_solver(ocp_mppi_bicycle_tracker_dcafb48e_solver_capsule* capsule) { return capsule->nlp_solver; }
-ocp_nlp_config *ocp_mppi_bicycle_tracker_dcafb48e_acados_get_nlp_config(ocp_mppi_bicycle_tracker_dcafb48e_solver_capsule* capsule) { return capsule->nlp_config; }
-void *ocp_mppi_bicycle_tracker_dcafb48e_acados_get_nlp_opts(ocp_mppi_bicycle_tracker_dcafb48e_solver_capsule* capsule) { return capsule->nlp_opts; }
-ocp_nlp_dims *ocp_mppi_bicycle_tracker_dcafb48e_acados_get_nlp_dims(ocp_mppi_bicycle_tracker_dcafb48e_solver_capsule* capsule) { return capsule->nlp_dims; }
-ocp_nlp_plan_t *ocp_mppi_bicycle_tracker_dcafb48e_acados_get_nlp_plan(ocp_mppi_bicycle_tracker_dcafb48e_solver_capsule* capsule) { return capsule->nlp_solver_plan; }
+ocp_nlp_in *ocp_mppi_bicycle_tracker_e3ac8181_acados_get_nlp_in(ocp_mppi_bicycle_tracker_e3ac8181_solver_capsule* capsule) { return capsule->nlp_in; }
+ocp_nlp_out *ocp_mppi_bicycle_tracker_e3ac8181_acados_get_nlp_out(ocp_mppi_bicycle_tracker_e3ac8181_solver_capsule* capsule) { return capsule->nlp_out; }
+ocp_nlp_out *ocp_mppi_bicycle_tracker_e3ac8181_acados_get_sens_out(ocp_mppi_bicycle_tracker_e3ac8181_solver_capsule* capsule) { return capsule->sens_out; }
+ocp_nlp_solver *ocp_mppi_bicycle_tracker_e3ac8181_acados_get_nlp_solver(ocp_mppi_bicycle_tracker_e3ac8181_solver_capsule* capsule) { return capsule->nlp_solver; }
+ocp_nlp_config *ocp_mppi_bicycle_tracker_e3ac8181_acados_get_nlp_config(ocp_mppi_bicycle_tracker_e3ac8181_solver_capsule* capsule) { return capsule->nlp_config; }
+void *ocp_mppi_bicycle_tracker_e3ac8181_acados_get_nlp_opts(ocp_mppi_bicycle_tracker_e3ac8181_solver_capsule* capsule) { return capsule->nlp_opts; }
+ocp_nlp_dims *ocp_mppi_bicycle_tracker_e3ac8181_acados_get_nlp_dims(ocp_mppi_bicycle_tracker_e3ac8181_solver_capsule* capsule) { return capsule->nlp_dims; }
+ocp_nlp_plan_t *ocp_mppi_bicycle_tracker_e3ac8181_acados_get_nlp_plan(ocp_mppi_bicycle_tracker_e3ac8181_solver_capsule* capsule) { return capsule->nlp_solver_plan; }
