@@ -36,6 +36,7 @@ extern "C" {
 #define casadi_s3 CASADI_PREFIX(s3)
 #define casadi_s4 CASADI_PREFIX(s4)
 #define casadi_s5 CASADI_PREFIX(s5)
+#define casadi_s6 CASADI_PREFIX(s6)
 
 /* Symbol visibility in DLLs */
 #ifndef CASADI_SYMBOL_EXPORT
@@ -55,11 +56,12 @@ extern "C" {
 static const casadi_int casadi_s0[3] = {6, 1, 1};
 static const casadi_int casadi_s1[3] = {2, 1, 1};
 static const casadi_int casadi_s2[3] = {0, 1, 1};
-static const casadi_int casadi_s3[3] = {1, 1, 1};
-static const casadi_int casadi_s4[6] = {8, 1, 0, 2, 1, 7};
-static const casadi_int casadi_s5[3] = {1, 0, 1};
+static const casadi_int casadi_s3[3] = {3, 1, 1};
+static const casadi_int casadi_s4[3] = {1, 1, 1};
+static const casadi_int casadi_s5[6] = {8, 1, 0, 2, 1, 7};
+static const casadi_int casadi_s6[3] = {1, 0, 1};
 
-/* mppi_bicycle_tracker_constr_h_0_fun_jac_uxt_zt:(i0[6],i1[2],i2[0],i3[0])->(o0,o1[8x1,2nz],o2[1x0]) */
+/* mppi_bicycle_tracker_constr_h_0_fun_jac_uxt_zt:(i0[6],i1[2],i2[0],i3[3])->(o0,o1[8x1,2nz],o2[1x0]) */
 static int casadi_f0(const casadi_real** arg, casadi_real** res, casadi_int* iw, casadi_real* w, int mem) {
   casadi_real a0, a1;
   a0=arg[1]? arg[1][1] : 0;
@@ -135,16 +137,16 @@ CASADI_SYMBOL_EXPORT const casadi_int* mppi_bicycle_tracker_constr_h_0_fun_jac_u
     case 0: return casadi_s0;
     case 1: return casadi_s1;
     case 2: return casadi_s2;
-    case 3: return casadi_s2;
+    case 3: return casadi_s3;
     default: return 0;
   }
 }
 
 CASADI_SYMBOL_EXPORT const casadi_int* mppi_bicycle_tracker_constr_h_0_fun_jac_uxt_zt_sparsity_out(casadi_int i) {
   switch (i) {
-    case 0: return casadi_s3;
-    case 1: return casadi_s4;
-    case 2: return casadi_s5;
+    case 0: return casadi_s4;
+    case 1: return casadi_s5;
+    case 2: return casadi_s6;
     default: return 0;
   }
 }

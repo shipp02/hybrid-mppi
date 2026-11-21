@@ -54,8 +54,16 @@ class GeneratedTrackerTest(unittest.TestCase):
     def test_first_step_steering_slew_is_constrained(self):
         constraints = self.payload['constraints']
         self.assertEqual(self.payload['dims']['nh_0'], 1)
-        self.assertEqual(constraints['lh_0'], constraints['lh'])
-        self.assertEqual(constraints['uh_0'], constraints['uh'])
+        self.assertEqual(constraints['lh_0'], constraints['lh'][:1])
+        self.assertEqual(constraints['uh_0'], constraints['uh'][:1])
+
+    def test_corridor_ball_is_a_soft_parametric_constraint(self):
+        dims, constraints = self.payload['dims'], self.payload['constraints']
+        self.assertEqual(dims['np'], 3)  # [cx, cy, r] per stage
+        self.assertEqual((dims['nh'], dims['nh_e'], dims['nsh'], dims['nsh_e']), (2, 1, 1, 1))
+        self.assertEqual(constraints['uh'][1], 0.0)
+        # a moderate lower bound: huge bounds wreck the interior-point QP's scaling
+        self.assertGreaterEqual(constraints['lh'][1], -1e3)
 
 
 if __name__ == '__main__':

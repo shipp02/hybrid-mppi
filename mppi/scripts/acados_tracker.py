@@ -20,6 +20,17 @@ def _bicycle_step(ca, x, u, cfg):
     return x + cfg.DT * (k1 + 2 * k2 + 2 * k3 + k4) / 6
 
 
+# NONLINEAR_LS weights. Stage y = [x, y, yaw, v | a, delta | da, ddelta | x-cx, y-cy];
+# the corridor-center terms are weighted only in corridor mode (eq. 29's Q).
+STAGE_WEIGHTS = (13.5, 13.5, 13.0, 5.5, 0.01, 1.0, 0.01, 10.0, 0.0, 0.0)
+TERMINAL_WEIGHTS = (13.5, 13.5, 13.0, 5.5, 0.0, 0.0)
+# Inactive corridor: a 10 m ball around the warm start keeps (x-cx)^2+(y-cy)^2-r^2
+# near -100, inside a moderate lower bound (huge bounds wreck HPIPM's scaling)
+INACTIVE_RADIUS = 10.0
+CORRIDOR_LOWER = -150.0  # lower bound of (x-cx)^2 + (y-cy)^2 - r^2
+CORRIDOR_SLACK = (1e2, 1e4)  # L1 and L2 penalty on corridor violation
+
+
 def build_ocp(cfg, max_steer_rate, export_directory):
     """Generate discrete nonlinear OCP; acados differentiates it online for RTI."""
     import casadi as ca
@@ -32,10 +43,15 @@ def build_ocp(cfg, max_steer_rate, export_directory):
     model.u = ca.SX.sym('u', 2)
     model.disc_dyn_expr = ca.vertcat(
         _bicycle_step(ca, model.x[:4], model.u, cfg), model.u)
+    # Corridor ball per stage, p = [cx, cy, r] (MPPI-IPDDP eq. 29).
+    model.p = ca.SX.sym('p', 3)
+    offset = model.x[:2] - model.p[:2]
+    ball = ca.sumsqr(offset) - model.p[2] ** 2
     model.cost_y_expr = ca.vertcat(
-        model.x[:4], model.u, model.u - model.x[4:])
-    model.cost_y_expr_e = model.x[:4]
-    model.con_h_expr = model.u[1] - model.x[5]
+        model.x[:4], model.u, model.u - model.x[4:], offset)
+    model.cost_y_expr_e = ca.vertcat(model.x[:4], offset)
+    model.con_h_expr = ca.vertcat(model.u[1] - model.x[5], ball)
+    model.con_h_expr_e = ball
     # acados skips con_h_expr at stage 0, so slew from the last command needs its own
     model.con_h_expr_0 = model.u[1] - model.x[5]
 
@@ -51,10 +67,11 @@ def build_ocp(cfg, max_steer_rate, export_directory):
     ocp.cost.cost_type = 'NONLINEAR_LS'
     ocp.cost.cost_type_e = 'NONLINEAR_LS'
     # State order everywhere: [x, y, yaw, v]. Position weights are world-frame.
-    ocp.cost.W = np.diag([13.5, 13.5, 13.0, 5.5, 0.01, 1.0, 0.01, 10.0])
-    ocp.cost.W_e = np.diag([13.5, 13.5, 13.0, 5.5])
-    ocp.cost.yref = np.zeros(8)
-    ocp.cost.yref_e = np.zeros(4)
+    ocp.cost.W = np.diag(STAGE_WEIGHTS)
+    ocp.cost.W_e = np.diag(TERMINAL_WEIGHTS)
+    ocp.cost.yref = np.zeros(len(STAGE_WEIGHTS))
+    ocp.cost.yref_e = np.zeros(len(TERMINAL_WEIGHTS))
+    ocp.parameter_values = np.array([0.0, 0.0, INACTIVE_RADIUS])
     ocp.constraints.x0 = np.zeros(6)
     ocp.constraints.idxbu = np.array([0, 1])
     ocp.constraints.lbu = np.array([cfg.MIN_ACCEL, cfg.MIN_STEER])
@@ -65,10 +82,20 @@ def build_ocp(cfg, max_steer_rate, export_directory):
     ocp.constraints.idxbx_e = np.array([3])
     ocp.constraints.lbx_e = np.array([cfg.MIN_SPEED])
     ocp.constraints.ubx_e = np.array([cfg.MAX_SPEED])
-    ocp.constraints.lh = np.array([-max_steer_rate * cfg.DT])
-    ocp.constraints.uh = np.array([max_steer_rate * cfg.DT])
-    ocp.constraints.lh_0 = ocp.constraints.lh
-    ocp.constraints.uh_0 = ocp.constraints.uh
+    slew = max_steer_rate * cfg.DT
+    ocp.constraints.lh = np.array([-slew, CORRIDOR_LOWER])
+    ocp.constraints.uh = np.array([slew, 0.0])
+    ocp.constraints.lh_0 = np.array([-slew])
+    ocp.constraints.uh_0 = np.array([slew])
+    ocp.constraints.lh_e = np.array([CORRIDOR_LOWER])
+    ocp.constraints.uh_e = np.array([0.0])
+    # Soft corridor: a hard ball can make the real-time QP infeasible
+    l1, l2 = CORRIDOR_SLACK
+    ocp.constraints.idxsh = np.array([1])
+    ocp.constraints.idxsh_e = np.array([0])
+    for suffix in ('', '_e'):
+        for name, value in (('zl', l1), ('zu', l1), ('Zl', l2), ('Zu', l2)):
+            setattr(ocp.cost, name + suffix, np.array([value]))
     ocp.code_export_directory = str(Path(export_directory).resolve())
     return ocp
 
@@ -142,9 +169,10 @@ class AcadosTracker:
         expected = build_ocp(self.cfg, self.max_steer_rate, directory)
         if (ocp.solver_options.N_horizon != self.cfg.H
                 or not np.isclose(ocp.solver_options.tf, self.cfg.H * self.cfg.DT)
-                or ocp.model.x.numel() != 6 or ocp.model.u.numel() != 2):
+                or ocp.model.x.numel() != 6 or ocp.model.u.numel() != 2
+                or ocp.model.p.numel() != 3):
             raise ValueError('Prebuilt solver horizon, timestep or dimensions do not match')
-        for field in ('lbu', 'ubu', 'lh', 'uh', 'lh_0', 'uh_0', 'lbx', 'lbx_e'):
+        for field in ('lbu', 'ubu', 'lh', 'uh', 'lh_0', 'uh_0', 'lh_e', 'uh_e', 'lbx', 'lbx_e'):
             if not np.allclose(getattr(ocp.constraints, field),
                                getattr(expected.constraints, field)):
                 raise ValueError(f'Prebuilt solver limits do not match: {field}')
@@ -176,9 +204,9 @@ class AcadosTracker:
             self.solver.set(stage, 'x', nominal[stage])
             self.solver.set(stage, 'u', controls[stage])
             self.solver.set(stage, 'yref', np.concatenate(
-                (targets[stage], controls[stage], np.zeros(2))))
+                (targets[stage], controls[stage], np.zeros(4))))
         self.solver.set(self.cfg.H, 'x', nominal[-1])
-        self.solver.set(self.cfg.H, 'yref', targets[-1])
+        self.solver.set(self.cfg.H, 'yref', np.concatenate((targets[-1], np.zeros(2))))
         self.solver.set(0, 'lbx', initial)
         self.solver.set(0, 'ubx', initial)
         # Permit bounded deceleration back into limits after noisy/out-of-range odometry.
@@ -189,6 +217,28 @@ class AcadosTracker:
                         initial[3] + stage * self.cfg.DT * self.cfg.MIN_ACCEL)
             self.solver.set(stage, 'lbx', np.array([lower]))
             self.solver.set(stage, 'ubx', np.array([upper]))
+
+    def _load_corridor(self, corridor, nominal):
+        """Ball per stage and its center weight; None leaves the ball inactive."""
+        if corridor is None:
+            balls = np.column_stack((nominal[:, :2], np.full(self.cfg.H + 1, INACTIVE_RADIUS)))
+            weight = 0.0
+        else:
+            centers, radii = (np.asarray(value, dtype=float) for value in corridor)
+            if centers.shape != (self.cfg.H + 1, 2) or radii.shape != (self.cfg.H + 1,):
+                raise ValueError('Invalid corridor horizon dimensions')
+            if not (np.isfinite(centers).all() and np.isfinite(radii).all()):
+                raise ValueError('Non-finite corridor')
+            balls = np.column_stack((centers, radii))
+            weight = self.cfg.CORRIDOR_Q
+        stage = np.array(STAGE_WEIGHTS[:-2])
+        if corridor is not None:
+            stage[-1] = self.cfg.CORRIDOR_STEER_RATE_WEIGHT  # steering change
+        stage_w = np.diag(np.r_[stage, weight, weight])
+        terminal_w = np.diag(np.r_[TERMINAL_WEIGHTS[:-2], weight, weight])
+        for stage in range(self.cfg.H + 1):
+            self.solver.set(stage, 'p', balls[stage])
+            self.solver.cost_set(stage, 'W', terminal_w if stage == self.cfg.H else stage_w)
 
     def _read_controls(self, previous_control):
         """Reject unusable RTI output rather than retaining last drive command."""
@@ -203,11 +253,18 @@ class AcadosTracker:
             raise RuntimeError('acados steering slew limit violated')
         return np.clip(controls, lower, upper)
 
-    def solve(self, x0, states, controls, previous_control, reference=None):
+    def solve(self, x0, states, controls, previous_control, reference=None, corridor=None):
+        """RTI from the MPPI warm start. corridor = (centers (H+1, 2), radii (H+1,)) or None.
+
+        With a corridor, CORRIDOR_SQP_ITERS iterations: the first linearizes the
+        ball at its center (zero gradient), the next ones enforce it.
+        """
         initial, nominal, controls, targets = prepare_reference(
             x0, states, controls, previous_control, self.cfg, reference)
         self._load_reference(initial, nominal, controls, targets)
-        status = self.solver.solve()
-        if status != 0:
-            raise RuntimeError(f'acados solve failed: status {status}')
+        self._load_corridor(corridor, nominal)
+        for _ in range(1 if corridor is None else self.cfg.CORRIDOR_SQP_ITERS):
+            status = self.solver.solve()
+            if status != 0:
+                raise RuntimeError(f'acados solve failed: status {status}')
         return self._read_controls(previous_control)
