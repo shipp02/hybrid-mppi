@@ -3,6 +3,7 @@ from dataclasses import replace
 from controller_config import MPPIConfig
 from functools import partial
 from typing import NamedTuple
+import signal
 import time
 
 import jax
@@ -15,8 +16,11 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPo
 from geometry_msgs.msg import Point
 from visualization_msgs.msg import Marker
 from rclpy.executors import ExternalShutdownException
+from rclpy.signals import SignalHandlerOptions
 from utils import calc_interpolated_ref_trajectory_gpu, shift_sequence
+from quintic_spline import QuinticSpline, fit_quintic_spline, sample_quintic_reference
 import occupancy_grid as og
+from planner_switch import PlannerSwitch
 import dynamic_bicycle as db
 
 import os
@@ -178,7 +182,7 @@ def cost_components(X, U, ref, cfg, grid):
     # Distance in meters: 10 at the car, 5 at 1 m, decreasing farther ahead.
     blocked_penalty = 1e1 / (1.0 + path_dist)
     # Keep timestep costs separate: mppi_update owns horizon/cost-to-go sums.
-    obs_block_cost = 10 * jnp.where(~obs_blocked, blocked_penalty, 0.0)
+    obs_block_cost = cfg.OBSTACLE_WEIGHT * jnp.where(~obs_blocked, blocked_penalty, 0.0)
 
     # position error in the frame of the reference: [lag, lateral]. From rest the
     # reference runs ahead of the car, and a plain x/y error is then all lag,
@@ -387,6 +391,18 @@ class ControlResult(NamedTuple):
     path_xy: jax.Array | None
     feasible: jax.Array = True
     top_paths: TopPaths | None = None
+    reference: jax.Array | None = None
+
+
+class Course(NamedTuple):
+    waypoints: jax.Array  # (N, 4) [x, y, yaw, v] for linear interpolation
+    spline: QuinticSpline
+
+
+def make_course(waypoints):
+    """Host-side: pair the raw waypoints with their closed quintic spline."""
+    waypoints = np.asarray(waypoints, dtype=np.float32)
+    return Course(waypoints, fit_quintic_spline(waypoints))
 
 
 def prepare_warm_start(state, observation, cfg):
@@ -405,11 +421,13 @@ def prepare_warm_start(state, observation, cfg):
 
 def build_reference(x0, course, cfg):
     """Build a speed-ramped world-frame reference from the current pose."""
-    cx, cy, cyaw, cv = course.T
+    v0 = jnp.hypot(x0[3], x0[4]) if cfg.DYNAMICS == 'dynamic' else x0[3]
+    if cfg.REFERENCE == 'quintic':
+        return sample_quintic_reference(
+            x0[0], x0[1], course.spline, cfg.DT, cfg.H, v0=v0, max_accel=cfg.MAX_ACCEL)
+    cx, cy, cyaw, cv = course.waypoints.T
     return calc_interpolated_ref_trajectory_gpu(
-        x0[0], x0[1], cx, cy, cyaw, cv, cfg.DT, cfg.H,
-        v0=jnp.hypot(x0[3], x0[4]) if cfg.DYNAMICS == 'dynamic' else x0[3],
-        max_accel=cfg.MAX_ACCEL)
+        x0[0], x0[1], cx, cy, cyaw, cv, cfg.DT, cfg.H, v0=v0, max_accel=cfg.MAX_ACCEL)
 
 
 def optimize_controls(state, x0, reference, grid, cfg, export_top_paths=False):
@@ -424,7 +442,7 @@ def optimize_controls(state, x0, reference, grid, cfg, export_top_paths=False):
     return OptimizationResult(ControllerState(key, U, U_std), samples, weights, top_paths)
 
 
-def select_control_outputs(solution, x0, grid, cfg, export_path):
+def select_control_outputs(solution, x0, reference, grid, cfg, export_path):
     """Export only selected XY, reusing the nominal required by dynamic checks."""
     path_xy = None
     feasible = jnp.bool_(True)
@@ -435,7 +453,8 @@ def select_control_outputs(solution, x0, grid, cfg, export_path):
         if export_path:
             path_xy = nominal[:, :2]
     return ControlResult(
-        solution.state, grid, solution.state.U[0], path_xy, feasible, solution.top_paths)
+        solution.state, grid, solution.state.U[0], path_xy, feasible, solution.top_paths,
+        reference)
 
 
 @partial(jax.jit, static_argnames=("cfg", "export_path", "export_top_paths"))
@@ -448,7 +467,7 @@ def control_step(state, observation, course, grid, cfg, *, export_path=False,
     solution = optimize_controls(
         state, observation.x0, reference, grid, cfg, export_top_paths)
     return select_control_outputs(
-        solution, observation.x0, grid, cfg, export_path)
+        solution, observation.x0, reference, grid, cfg, export_path)
 
 
 @partial(jax.jit, static_argnames=("cfg", "export_top_paths"))
@@ -458,6 +477,19 @@ def tracking_control_step(state, observation, course, grid, cfg, *, export_top_p
         state, observation, course, grid, cfg, export_top_paths=export_top_paths)
     nominal = simulate(observation.x0, result.state.U, cfg)
     return result, nominal
+
+
+def speed_setpoint(x0, action, cfg):
+    """Published speed: current speed plus planned accel over the lead time.
+
+    Dynamic rollouts model the command itself (x0[7]), so they keep one DT.
+    """
+    if cfg.DYNAMICS == 'dynamic':
+        target = x0[7] + float(action[0]) * cfg.DT
+    else:
+        lead = cfg.SPEED_LEAD_TIME if action[0] > 0 else cfg.BRAKE_LEAD_TIME
+        target = x0[3] + float(action[0]) * lead
+    return float(np.clip(target, cfg.MIN_SPEED, cfg.MAX_SPEED))
 
 
 def calc_waypoint_yaw(x, y):
@@ -486,7 +518,8 @@ class MPPI(Node):
         track = self.get_parameter('track').value
         
         overrides = {}
-        for field in ('MAX_SPEED', 'LAMBDA', 'INTEGRATOR', 'SAMPLING', 'COV_UPDATE',
+        for field in ('MAX_SPEED', 'LAMBDA', 'INTEGRATOR', 'SAMPLING', 'COV_UPDATE', 'REFERENCE',
+                      'SPEED_LEAD_TIME', 'BRAKE_LEAD_TIME', 'OBSTACLE_WEIGHT', 'U_STD', 'U_STD_MIN',
                       'DYNAMICS', 'MASS', 'YAW_INERTIA', 'WB', 'FRONT_LENGTH', 'TIRE_MU',
                       'FRONT_STIFFNESS', 'REAR_STIFFNESS', 'FRONT_DRIVE_FRACTION',
                       'SPEED_RESPONSE_TIME', 'MAX_STEER_RATE', 'DYNAMIC_SUBSTEPS',
@@ -503,8 +536,14 @@ class MPPI(Node):
         self.declare_parameter('tracker', 'none')
         self.declare_parameter('tracker_prebuilt_dir', '')
         self.declare_parameter('tracker_max_steer_rate', float(np.pi))
+        # MPC target: 'spline' tracks the sampled reference, 'nominal' the MPPI plan
+        self.declare_parameter('tracker_reference', 'spline')
+        self.tracker_reference = self.get_parameter('tracker_reference').value
+        if self.tracker_reference not in ('spline', 'nominal'):
+            raise ValueError('tracker_reference must be spline or nominal')
         self.tracker = self._create_tracker()
-        self._last_tracker_action = np.zeros(2)
+        self.planner_switch = self._create_planner_switch()
+        self._last_tracker_action = np.zeros(2)  # last published [accel, steer]
         self._last_drive_command = np.zeros(2)  # [steering, speed setpoint]
 
         self.control_state = ControllerState(
@@ -541,14 +580,17 @@ class MPPI(Node):
         self._last_control_start = None
         self._stats_window_start = None
 
+        # LiDAR ahead of the odometry point; car odom is at the COM, sim odom at base_link
+        self.declare_parameter('lidar_offset', 0.1016)
+        # local grid reach ahead of the car; rollouts past it see the edge cells
+        self.declare_parameter('grid_forward', 6.0)
         # Geometry is initialized after the fixed LiDAR pose becomes available.
         self._grid_settings = dict(
             width=3.0,
-            height=7.0,
+            height=float(self.get_parameter('grid_forward').value) + 1.0,
             middle=(1.5, 1.0),
             resolution=0.05,
             inflation_radius=0.15,
-            num_beams=811,
             distance_cap=0.25,
         )
         self.grid = None
@@ -574,11 +616,12 @@ class MPPI(Node):
         d = np.diff(self.waypoints[:, :2], axis=0)
         yaw = np.arctan2(d[:, 1], d[:, 0])
         yaw = np.append(yaw, yaw[-1])
-        # self.waypoints[:, 3] = np.minimum(self.waypoints[:, 3], self.config.MAX_SPEED)
-        # Fixed course geometry: compute once, upload once.
-        self.course = jax.device_put(np.column_stack((
+        # reference must not outrun the car, or the x/y targets run ahead and cut corners
+        self.waypoints[:, 3] = np.minimum(self.waypoints[:, 3], self.config.MAX_SPEED)
+        # Fixed course geometry: fit the spline once, upload once.
+        self.course = jax.device_put(make_course(np.column_stack((
             self.waypoints[:, :2], yaw, self.waypoints[:, 3],
-        )).astype(np.float32), self.device)
+        ))), self.device)
 
         self.declare_parameter('publish_top_paths', False)
         self.publish_top_paths_enabled = self.get_parameter('publish_top_paths').value
@@ -595,9 +638,10 @@ class MPPI(Node):
                 self.config.H + 1, self.get_parameter('path_frame').value,
                 publish_history=self.publish_selected_paths_enabled,
                 publish_top_paths=self.publish_top_paths_enabled,
-                grid_settings=self._grid_settings if self.publish_occupancy_grid_enabled else None)
+                grid_settings=self._grid_settings if self.publish_occupancy_grid_enabled else None,
+                publish_planner=self.tracker is not None)
             if (self.publish_selected_paths_enabled or self.publish_top_paths_enabled
-                or self.publish_occupancy_grid_enabled) else None)
+                or self.publish_occupancy_grid_enabled or self.tracker is not None) else None)
 
         self.get_logger().info(f'MPPI initialized on {track}; waiting for LiDAR extrinsics')
 
@@ -649,6 +693,33 @@ class MPPI(Node):
             max_steer_rate=self.get_parameter('tracker_max_steer_rate').value,
             export_directory=prebuilt_directory,
             generate=False)
+
+    def _create_planner_switch(self):
+        """Which planner's command is published: fixed, or switched on speed."""
+        self.declare_parameter('planner', '')
+        self.declare_parameter('low_speed_planner', 'mpc')
+        self.declare_parameter('high_speed_planner', 'mppi')
+        # MPC tracks best from rest; it oscillates above ~4 m/s in the ST sim, MPPI does not
+        self.declare_parameter('high_enter_speed', 4.0)  # low -> high planner
+        self.declare_parameter('high_exit_speed', 3.0)  # high -> low planner
+        self.declare_parameter('switch_min_dwell', 0.5)  # seconds between switches
+        planner = self.get_parameter('planner').value or (
+            'mppi' if self.tracker is None else 'mpc')
+        if planner == 'hybrid':
+            switch = PlannerSwitch(
+                self.get_parameter('low_speed_planner').value,
+                self.get_parameter('high_speed_planner').value,
+                float(self.get_parameter('high_enter_speed').value),
+                float(self.get_parameter('high_exit_speed').value),
+                int(round(self.get_parameter('switch_min_dwell').value / self.config.DT)))
+        elif planner in ('mppi', 'mpc'):
+            switch = PlannerSwitch.fixed(planner)
+        else:
+            raise ValueError('planner must be mppi, mpc or hybrid')
+        if 'mpc' in switch.uses and self.tracker is None:
+            raise ValueError(f'planner {planner} needs tracker:=acados')
+        self.planner_mode = planner
+        return switch
 
     def _configure_device(self):
         """Select backend before allocating state; GPU requests never fall back."""
@@ -710,16 +781,26 @@ class MPPI(Node):
         )
 
     def _lookup_lidar_pose(self, scan_frame, scan_stamp):
-        """Return fixed hardware LiDAR pose [forward metres, left metres, yaw].
+        """Return fixed LiDAR pose [forward metres, left metres, yaw].
 
-        Assumes COM-based odometry and a centered, forward-facing sensor.
-        LiDAR is 10.5 inches and estimated COM is 6.5 inches from rear axle.
+        Assumes a centered, forward-facing sensor `lidar_offset` ahead of the
+        odometry point. Default: car LiDAR is 10.5 in and COM 6.5 in from the
+        rear axle, so 4 in ahead of COM odometry.
         """
-        return (0.1016, 0.0, 0.0)  # 4 inches forward of COM
+        return (float(self.get_parameter('lidar_offset').value), 0.0, 0.0)
 
-    def _ensure_grid(self, scan_frame, scan_stamp):
-        """Cache rigid sensor geometry; resolve it again if either frame changes."""
-        frames = (self._odom_child_frame, scan_frame)
+    @staticmethod
+    def _scan_geometry(scan):
+        """Beam count and angular span of a cached scan."""
+        ranges, angle_min, angle_increment = scan[:3]
+        return dict(num_beams=len(ranges), angle_min=angle_min,
+                    angle_max=angle_min + angle_increment * (len(ranges) - 1))
+
+    def _ensure_grid(self, scan):
+        """Cache rigid sensor geometry; rebuild if a frame or the beam layout changes."""
+        scan_frame, scan_stamp = scan[5], scan[6]
+        geometry = self._scan_geometry(scan)
+        frames = (self._odom_child_frame, scan_frame, tuple(geometry.values()))
         if self._grid_frames == frames:
             return True
         lidar_pose = self._lookup_lidar_pose(scan_frame, scan_stamp)
@@ -727,7 +808,8 @@ class MPPI(Node):
             return False
         # Do not leave a previous drive command active during JAX compilation.
         self._publish_stop(self.get_clock().now())
-        self.grid = og.OccupancyGrid.create(lidar_pose=lidar_pose, **self._grid_settings)
+        self.grid = og.OccupancyGrid.create(
+            lidar_pose=lidar_pose, **self._grid_settings, **geometry)
         self._warm_up()
         # Compilation pauses are not steady-state control-loop measurements.
         self._control_latencies.clear()
@@ -750,30 +832,50 @@ class MPPI(Node):
                 export_top_paths=self.publish_top_paths_enabled)
             self._publish_control_result(result, observation, now)
         else:
-            self._track_and_publish(observation, now)
+            self._plan_and_publish(observation, now)
         self._log_control_stats(control_start)
 
-    def _track_and_publish(self, observation, now):
-        """Plan on GPU, track on CPU, then publish one command."""
+    def _plan_and_publish(self, observation, now):
+        """MPPI plans every tick; the switch picks MPPI's or the MPC's command."""
         result, nominal = tracking_control_step(
             self.control_state, observation, self.course, self.grid,
             self.config,
             export_top_paths=self.publish_top_paths_enabled)
         self.control_state, self.grid = result.state, result.grid
         self._publish_occupancy_grid(observation, now)
-        states, controls = jax.device_get((nominal, result.state.U))
-        try:
-            tracked = self.tracker.solve(
-                observation.x0, states, controls, self._last_tracker_action)
-        except (RuntimeError, ValueError) as exc:
-            self.get_logger().error(f'Tracker rejected command: {exc}', throttle_duration_sec=1.0)
+        plan = jax.device_get((result.action, nominal, result.state.U, result.reference))
+        planner = self._select_planner(observation)
+        action, planner = self._planner_action(planner, plan, observation.x0)
+        self.path_publisher.planner.record(planner)
+        if action is None:
             self._publish_stop(now)
             return
-        self._last_tracker_action = tracked[0].copy()
-        self._publish_drive(tracked[0], observation.x0, now)
+        self._last_tracker_action = np.asarray(action, dtype=float).copy()
+        self._publish_drive(action, observation.x0, now)
         if self.publish_selected_paths_enabled:
-            self.path_publisher.history.try_record(states[:, :2], now.nanoseconds)
+            self.path_publisher.history.try_record(plan[1][:, :2], now.nanoseconds)
         self._publish_top_paths(result.top_paths, now)
+
+    def _select_planner(self, observation):
+        """Advance the speed schedule; a pose jump restarts it from low speed."""
+        if observation.reset:
+            self.planner_switch.reset()
+        return self.planner_switch.select(float(observation.x0[3]))
+
+    def _planner_action(self, planner, plan, x0):
+        """[accel, steer] of the chosen planner; hybrid falls back to MPPI."""
+        mppi_action, states, controls, reference = plan
+        if planner == 'mppi':
+            return mppi_action, planner
+        target = reference if self.tracker_reference == 'spline' else None
+        try:
+            tracked = self.tracker.solve(x0, states, controls, self._last_tracker_action, target)
+            return tracked[0], planner
+        except (RuntimeError, ValueError) as exc:
+            self.get_logger().error(f'Tracker rejected command: {exc}', throttle_duration_sec=1.0)
+        if self.planner_mode == 'hybrid':
+            return mppi_action, 'mppi'
+        return None, planner
 
     def _prepare_control_observation(self, now):
         """Validate sensors and compute host-side timing/reset policy."""
@@ -799,7 +901,7 @@ class MPPI(Node):
             return
 
         ranges, angle_min, angle_increment, range_min, range_max, scan_frame, scan_stamp = scan
-        if not self._ensure_grid(scan_frame, scan_stamp):
+        if not self._ensure_grid(scan):
             self._publish_stop(now)
             return
 
@@ -869,14 +971,7 @@ class MPPI(Node):
         drive_msg.header.stamp = now.to_msg()
         drive_msg.drive.steering_angle = float(action[1])
 
-        previous_speed = x0[7] if self.config.DYNAMICS == 'dynamic' else x0[3]
-        target_speed = previous_speed + float(action[0]) * self.config.DT
-        target_speed = np.clip(
-            target_speed,
-            self.config.MIN_SPEED,
-            self.config.MAX_SPEED,
-        )
-
+        target_speed = speed_setpoint(x0, action, self.config)
         drive_msg.drive.speed = float(target_speed)
         self._last_drive_command = np.array([float(action[1]), float(target_speed)])
         self.drive_publisher.publish(drive_msg)
@@ -926,6 +1021,14 @@ class MPPI(Node):
         msg.drive.steering_angle = 0.0
         self.drive_publisher.publish(msg)
 
+    def stop_vehicle(self, repeats=5):
+        """Leave the car stopped: the driver keeps applying the last /drive."""
+        if not rclpy.ok():
+            return
+        for _ in range(repeats):
+            self._publish_stop(self.get_clock().now())
+            time.sleep(0.01)
+
     def destroy_node(self):
         """Release the optional publisher process before shutting down ROS."""
         if self.path_publisher is not None:
@@ -933,16 +1036,27 @@ class MPPI(Node):
         return super().destroy_node()
 
 
+def _interrupt(signum, frame):
+    raise KeyboardInterrupt
+
+
 def main(args=None):
-    rclpy.init(args=args)
+    # Own SIGINT/SIGTERM: rclpy's handler shuts the context down first, and the
+    # stop command could no longer be published.
+    rclpy.init(args=args, signal_handler_options=SignalHandlerOptions.NO)
+    signal.signal(signal.SIGINT, _interrupt)
+    signal.signal(signal.SIGTERM, _interrupt)
     print("MPPI Initialized")
-    mppi_node = MPPI()
+    mppi_node = None
     try:
+        mppi_node = MPPI()
         rclpy.spin(mppi_node)
     except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
-        mppi_node.destroy_node()
+        if mppi_node is not None:
+            mppi_node.stop_vehicle()
+            mppi_node.destroy_node()
         rclpy.try_shutdown()
 
 

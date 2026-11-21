@@ -19,7 +19,23 @@ PARAMETERS = {
     'track': 'levine',
     'use_cpu': True,
     'odom_topic' : '/ego_racecar/odom',
-    'publish_selected_paths': False
+    'publish_selected_paths': False,
+    # acados MPC tracks the quintic spline reference (needs -DMPPI_BUILD_ACADOS=ON)
+    'tracker': 'acados',
+    'tracker_reference': 'spline',
+    # MPC from rest, MPPI from 4 m/s, back to MPC below 3 m/s
+    'planner': 'hybrid',
+    'max_speed': 6.0,
+    # gym speed loop is P with gain ~4.75 accelerating, ~19 braking
+    'speed_lead_time': 0.2,
+    'brake_lead_time': 0.05,
+    # sim odom is base_link (rear axle); sim.yaml mounts the LiDAR 0.275 m ahead
+    'lidar_offset': 0.275,
+    # less steering noise and a greedier average: noisy steering penalized fast
+    # samples, so MPPI averaged toward braking and cruised at ~3 m/s
+    'u_std': [1.5, 0.05],
+    'u_std_min': [0.3, 0.02],
+    'lambda': 0.03,
 }
 
 

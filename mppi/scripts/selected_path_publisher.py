@@ -11,6 +11,9 @@ import numpy as np
 HISTORY_SIZE = 10
 PUBLISH_PERIOD = 0.5
 TOPIC = '/mppi/selected_paths'
+PLANNER_TOPIC = '/mppi/planner'
+PLANNER_PERIOD = 0.1
+PLANNER_NAMES = ('mppi', 'mpc')
 COST_NAMES = ('tracking', 'control', 'control_change', 'obstacle', 'envelope')
 
 
@@ -317,7 +320,48 @@ class OccupancyGridPublication:
         self.publisher.publish(build_occupancy_grid(cells, pose, stamp, self.shared, self.frame))
 
 
-def run_publisher(history, stop, frame, top_paths=None, publish_history=True, occupancy_grid=None):
+class SharedPlanner:
+    """Latest active planner; the control loop writes two ints and never waits.
+
+    No lock: a reader may pair a new sequence with the previous planner for one
+    period, which only delays the latest-only status by PLANNER_PERIOD.
+    """
+
+    def __init__(self, context):
+        self._index = context.RawValue('i', -1)
+        self._sequence = context.RawValue('Q', 0)
+
+    def record(self, planner):
+        self._index.value = PLANNER_NAMES.index(planner)
+        self._sequence.value += 1
+
+    def snapshot(self):
+        return self._index.value, self._sequence.value
+
+
+class PlannerPublication:
+    """Publish the active planner from the child process, only when it was updated."""
+
+    def __init__(self, node, shared):
+        from std_msgs.msg import String
+
+        self.shared = shared
+        self.sequence = 0
+        self.publisher = node.create_publisher(String, PLANNER_TOPIC, publisher_qos())
+        self.timer = node.create_timer(PLANNER_PERIOD, self.publish)
+
+    def publish(self):
+        from std_msgs.msg import String
+
+        index, sequence = self.shared.snapshot()
+        if sequence == self.sequence or index < 0:
+            return
+        self.sequence = sequence
+        self.publisher.publish(String(data=PLANNER_NAMES[index]))
+
+
+def run_publisher(history, stop, frame, top_paths=None, publish_history=True, occupancy_grid=None,
+                  planner=None):
     """Spawn entry point: independent ROS node, no inherited CUDA context."""
     import rclpy
     from rclpy.node import Node
@@ -328,6 +372,7 @@ def run_publisher(history, stop, frame, top_paths=None, publish_history=True, oc
     publication = HistoryPublication(node, history, frame) if publish_history else None
     top_publication = TopPathPublication(node, top_paths, frame) if top_paths is not None else None
     grid_publication = OccupancyGridPublication(node, occupancy_grid, frame) if occupancy_grid is not None else None
+    planner_publication = PlannerPublication(node, planner) if planner is not None else None
     try:
         while not stop.is_set() and rclpy.ok():
             rclpy.spin_once(node, timeout_sec=.1)
@@ -342,15 +387,16 @@ class PathPublisherProcess:
     """Own spawned process and bounded shared history; call close on node shutdown."""
 
     def __init__(self, points, frame='map', *, publish_history=True, publish_top_paths=False,
-                 grid_settings=None):
+                 grid_settings=None, publish_planner=False):
         context = mp.get_context('spawn')
         self.history = SharedPathHistory(context, points)
         self.top_paths = SharedTopPaths(context, points) if publish_top_paths else None
         self.occupancy_grid = SharedOccupancyGrid(context, grid_settings) if grid_settings is not None else None
+        self.planner = SharedPlanner(context) if publish_planner else None
         self._stop = context.Event()
         self._process = context.Process(target=run_publisher,
             args=(self.history, self._stop, frame, self.top_paths, publish_history,
-                  self.occupancy_grid), daemon=True)
+                  self.occupancy_grid, self.planner), daemon=True)
         self._process.start()
 
     def close(self):

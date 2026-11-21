@@ -41,6 +41,8 @@ install(PROGRAMS
   scripts/selected_path_publisher.py
   scripts/occupancy_grid.py
   scripts/utils.py
+  scripts/quintic_spline.py
+  scripts/planner_switch.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
