@@ -1,5 +1,15 @@
 # Lab 8: Model Predictive Path Integral Control
 
+# Occupancy Grid Issue Reproduction
+
+```
+ros2 bag play --clock --rate 0.1 ../rosbags/lidar_grid_debug/
+ros2 run mppi mppi_node.py --ros-args      -p odom_topic:=/pf/pose/odom      -p track:=levine   -p use_cpu:=true      -p publish_occupancy_grid:=true -p use_sim_time:=true
+```
+
+```
+```
+
 Experimental direct slip-aware control: [dynamic MPPI setup and limitations](docs/dynamic-mppi.md).
 Kinematic mode remains the default.
 
