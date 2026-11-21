@@ -22,9 +22,9 @@ class MPPIConfig:
     U_STD_MIN: tuple = (0.3, 0.03)  # covariance update: floor of the std
     COV_ALPHA: float = 0.5  # covariance update: blend of the new std
     # cost() weights the position error along the reference (lag) and across it (lateral)
-    Q: tuple = (0.5, 0.5, 0.1, 1.0)  # state error cost [lag, lateral, yaw, v]
-    Qf: tuple = (1.0, 1.0, 0.2, 1.0)  # final state error cost [lag, lateral, yaw, v]
-    R: tuple = (0.01, 1.0)  # input cost [a, delta]
+    Q: tuple = (5.0, 5.0, 1.0, 1.0)  # state error cost [x, y, yaw, v]
+    Qf: tuple = (5.0, 5.0, 1.0, 1.0)  # final state error cost [x, y, yaw, v]
+    R: tuple = (0.01, 0.01)  # input cost [a, delta]
     Rd: tuple = (0.01, 1.0)  # input difference cost [a, delta]
     # ---------------------------------------------------
 
