@@ -290,18 +290,16 @@ def select_feasible_controls(U, samples, trajectories, costs, x0, cfg):
         trajectories, samples, cfg)
     score = jnp.where(sample_ok, jnp.sum(costs, axis=1), jnp.inf)
     best = samples[jnp.argmin(score)]
-    braking = db.project_controls(
-        jnp.tile(jnp.array([cfg.MIN_ACCEL, 0.]), (cfg.H, 1)), x0, cfg)
+    braking = jnp.tile(jnp.array([cfg.MIN_ACCEL, 0.]), (cfg.H, 1))
     alternative = jnp.where(jnp.any(sample_ok), best, braking)
     return jnp.where(mean_ok, U, alternative)
 
 
 def sample_rollout_controls(key, U, U_std, x0, cfg):
-    """Sample reachable commands and preserve the current nominal as a candidate."""
+    """Sample bounded commands and preserve the current nominal as a candidate."""
     samples = sample_controls(key, U, U_std, cfg)
     if cfg.DYNAMICS == 'dynamic':
-        samples = jax.vmap(db.project_controls, in_axes=(0, None, None))(samples, x0, cfg)
-        samples = samples.at[0].set(db.project_controls(U, x0, cfg))
+        samples = samples.at[0].set(U)
     return samples
 
 
@@ -327,8 +325,6 @@ def mppi_update(key, U, U_std, x0, ref, cfg, grid, *, export_top_paths=False):
     # 5. Update: U_new[t] = sum_k w[k, t] * u_k[t]
     U_new = jnp.sum(weights[:, :, jnp.newaxis] * U_samples, axis=0)
     if cfg.DYNAMICS == 'dynamic':
-        # Per-timestep weights can break slew even when every sample obeys it.
-        U_new = db.project_controls(U_new, x0, cfg)
         U_new = select_feasible_controls(U_new, U_samples, X_samples, C, x0, cfg)
 
     # Bonus: covariance update, Sigma_t = sum_k w[k, t] (u_k[t] - U_t)(u_k[t] - U_t)^T.

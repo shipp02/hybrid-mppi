@@ -47,14 +47,25 @@ class DynamicMPPItest(unittest.TestCase):
             else:
                 self.assertIsNone(result.path_xy)
 
-    def test_sampling_retains_nominal_and_respects_command_slew(self):
-        samples = c.sample_rollout_controls(self.state.key, self.U, self.state.U_std,
-                                           self.x0, self.cfg)
-        np.testing.assert_array_equal(samples[0], self.U)
-        steering = np.concatenate((np.full((self.cfg.T, 1), float(self.x0[6])),
-                                    np.asarray(samples[:, :, 1])), axis=1)
-        self.assertTrue(np.all(np.abs(np.diff(steering, axis=1))
-                               <= self.cfg.MAX_STEER_RATE * self.cfg.DT + 1e-6))
+    def test_sampling_retains_nominal_without_projecting_candidates(self):
+        for sampling in ('clip', 'uniform', 'truncated'):
+            with self.subTest(sampling=sampling):
+                cfg = replace(self.cfg, SAMPLING=sampling, MAX_STEER_RATE=.001)
+                expected = c.sample_controls(self.state.key, self.U, self.state.U_std, cfg)
+                samples = c.sample_rollout_controls(self.state.key, self.U, self.state.U_std,
+                                                   self.x0, cfg)
+                np.testing.assert_array_equal(samples[0], self.U)
+                np.testing.assert_array_equal(samples[1:], expected[1:])
+                self.assertTrue(np.any(np.abs(np.asarray(samples[1:, 0, 1]))
+                                       > cfg.MAX_STEER_RATE * cfg.DT))
+
+    def test_braking_fallback_is_not_projected(self):
+        bad = jnp.tile(jnp.array([0., .4]), (self.cfg.H, 1))
+        bad_X = c.simulate(self.x0, bad, self.cfg)
+        selected = c.select_feasible_controls(bad, bad[None], bad_X[None],
+            jnp.zeros((1, self.cfg.H)), self.x0, self.cfg)
+        expected = jnp.tile(jnp.array([self.cfg.MIN_ACCEL, 0.]), (self.cfg.H, 1))
+        np.testing.assert_array_equal(selected, expected)
 
     def test_weighted_nominal_rejected_in_favor_of_feasible_sample(self):
         bad = jnp.tile(jnp.array([0., .4]), (self.cfg.H, 1))

@@ -9,24 +9,6 @@ import jax
 import jax.numpy as jnp
 
 
-def project_controls(U, x0, cfg):
-    """Make each command reachable from the preceding published command."""
-    def advance(previous, desired):
-        speed, steering = previous
-        next_speed = jnp.clip(speed + cfg.DT * desired[0], 0., cfg.MAX_SPEED)
-        next_steering = jnp.clip(desired[1],
-                                 steering - cfg.MAX_STEER_RATE * cfg.DT,
-                                 steering + cfg.MAX_STEER_RATE * cfg.DT)
-        next_steering = jnp.clip(next_steering, cfg.MIN_STEER, cfg.MAX_STEER)
-        action = jnp.array([(next_speed - speed) / cfg.DT, next_steering])
-        return (next_speed, next_steering), action
-
-    bounded = jnp.clip(U, jnp.array([cfg.MIN_ACCEL, cfg.MIN_STEER]),
-                       jnp.array([cfg.MAX_ACCEL, cfg.MAX_STEER]))
-    _, commands = jax.lax.scan(advance, (x0[7], x0[6]), bounded)
-    return commands
-
-
 def tire_forces(state, command_speed, steering, cfg):
     """Allocate longitudinal demand and saturate each axle's combined grip."""
     vx, vy, rate = state[3:6]

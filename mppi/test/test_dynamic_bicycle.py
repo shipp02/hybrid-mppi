@@ -64,18 +64,6 @@ class DynamicBicycleTest(unittest.TestCase):
                 x = step(x, jnp.array([.5, .2]), self.cfg)
             self.assertTrue(np.isfinite(x).all())
 
-    def test_projection_enforces_first_and_later_slew(self):
-        cfg = replace(self.cfg, MAX_STEER_RATE=1.)
-        U = jnp.array([[10., .4], [10., -.4], [-10., .4]])
-        x = self.x.at[7].set(5.99)
-        commands = model.project_controls(U, x, cfg)
-        steering = np.r_[float(x[6]), np.asarray(commands[:, 1])]
-        self.assertTrue(np.all(np.abs(np.diff(steering)) <= cfg.MAX_STEER_RATE * cfg.DT + 1e-6))
-        targets = float(x[7]) + np.cumsum(np.asarray(commands[:, 0])) * cfg.DT
-        self.assertTrue(np.all((targets >= 0) & (targets <= cfg.MAX_SPEED + 1e-6)))
-        self.assertTrue(np.all(commands[:, 0] <= cfg.MAX_ACCEL + 1e-5))
-        np.testing.assert_allclose(model.project_controls(commands, x, cfg), commands, atol=1e-5)
-
     def test_cost_projection_allows_heading_course_difference(self):
         beta = .3
         x = self.x.at[2].set(-beta).at[3].set(3 * np.cos(beta)).at[4].set(3 * np.sin(beta))
