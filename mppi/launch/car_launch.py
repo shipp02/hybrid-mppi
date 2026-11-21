@@ -17,9 +17,9 @@ def launch_controller(context):
         'horizon': int, 'max_speed': float,
     }
     for name, value_type in parameter_types.items():
-        value = LaunchConfiguration(name).perform(context)
-        if value:
-            overrides[name] = ParameterValue(value, value_type=value_type)
+        argument = LaunchConfiguration(name)
+        if argument.perform(context):
+            overrides[name] = ParameterValue(argument, value_type=value_type)
     return [Node(
         package='mppi',
         executable='mppi_node.py',
