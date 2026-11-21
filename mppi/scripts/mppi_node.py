@@ -443,7 +443,9 @@ def control_step(state, observation, course, grid, cfg, *, export_path=False,
                  export_top_paths=False):
     """One compiled dispatch; helpers preserve domain responsibility boundaries."""
     state = prepare_warm_start(state, observation, cfg)
-    grid = grid.from_scan(observation.ranges, observation.range_max)
+    grid = grid.from_scan(
+        observation.ranges, observation.range_max,
+        pose=observation.x0[:3], reset=observation.reset)
     reference = build_reference(observation.x0, course, cfg)
     solution = optimize_controls(
         state, observation.x0, reference, grid, cfg, export_top_paths)
