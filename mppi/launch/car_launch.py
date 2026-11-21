@@ -44,7 +44,7 @@ def generate_launch_description():
             'tracker', default_value='', description='Override tracker: none or acados'),
         DeclareLaunchArgument(
             'tracker_reference', default_value='',
-            description='Override MPC target: spline or nominal'),
+            description='Override MPC target: spline, nominal or corridor (hybrid MPPI-MPC)'),
         DeclareLaunchArgument(
             'dynamics', default_value='', description='Override dynamics: kinematic or dynamic'),
         DeclareLaunchArgument('publish_selected_paths', default_value=''),
