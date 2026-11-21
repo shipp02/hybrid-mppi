@@ -20,6 +20,7 @@ from rclpy.signals import SignalHandlerOptions
 from utils import calc_interpolated_ref_trajectory_gpu, shift_sequence
 from quintic_spline import QuinticSpline, fit_quintic_spline, sample_quintic_reference
 import occupancy_grid as og
+from corridor import plan_corridor, line_reference_along_plan
 import dynamic_bicycle as db
 
 import os
@@ -478,6 +479,41 @@ def tracking_control_step(state, observation, course, grid, cfg, *, export_top_p
     return result, nominal
 
 
+@partial(jax.jit, static_argnames=("cfg", "export_top_paths"))
+def corridor_control_step(state, observation, course, grid, cfg, scan_pose, *,
+                          export_top_paths=False):
+    """Hybrid MPPI-MPC on device: coarse MPPI plan, the collision-free corridor
+    around it, and the MPC's task, the race line at the plan's progress.
+
+    scan_pose: measured pose the LiDAR grid was built at (the plan may start from
+    a delay-compensated state).
+    """
+    result, nominal = tracking_control_step(
+        state, observation, course, grid, cfg, export_top_paths=export_top_paths)
+    corridor = plan_corridor(nominal, scan_pose, result.grid, cfg)
+    line = line_reference_along_plan(nominal, course.spline)
+    return result._replace(reference=line), nominal, corridor
+
+
+def compensate_delay(x0, applied, cfg):
+    """Kinematic state after DELAY_COMPENSATION seconds under the applied [accel, steer].
+
+    Planning starts from where the car will be when the new command takes
+    effect, not where it was measured. Dynamic mode is left unchanged.
+    """
+    if cfg.DELAY_COMPENSATION <= 0.0 or cfg.DYNAMICS == 'dynamic':
+        return x0
+    x = np.asarray(x0, dtype=float)
+    a, delta = float(applied[0]), float(applied[1])
+    dt = cfg.DELAY_COMPENSATION
+    speed = float(np.clip(x[3] + a * dt, cfg.MIN_SPEED, cfg.MAX_SPEED))
+    mean_speed = 0.5 * (x[3] + speed)
+    yaw = x[2] + mean_speed * np.tan(delta) / cfg.WB * dt
+    mean_yaw = 0.5 * (x[2] + yaw)
+    return np.array([x[0] + mean_speed * np.cos(mean_yaw) * dt,
+                     x[1] + mean_speed * np.sin(mean_yaw) * dt, yaw, speed])
+
+
 def speed_setpoint(x0, action, cfg):
     """Published speed: current speed plus planned accel over the lead time.
 
@@ -518,6 +554,8 @@ class MPPI(Node):
         
         overrides = {}
         for field in ('MAX_SPEED', 'LAMBDA', 'INTEGRATOR', 'SAMPLING', 'COV_UPDATE', 'REFERENCE',
+                      'CORRIDOR_R_MAX', 'CORRIDOR_Q', 'CORRIDOR_SQP_ITERS',
+                      'CORRIDOR_STEER_RATE_WEIGHT', 'DELAY_COMPENSATION',
                       'SPEED_LEAD_TIME', 'BRAKE_LEAD_TIME', 'OBSTACLE_WEIGHT', 'U_STD', 'U_STD_MIN',
                       'DYNAMICS', 'MASS', 'YAW_INERTIA', 'WB', 'FRONT_LENGTH', 'TIRE_MU',
                       'FRONT_STIFFNESS', 'REAR_STIFFNESS', 'FRONT_DRIVE_FRACTION',
@@ -538,8 +576,10 @@ class MPPI(Node):
         # MPC target: 'spline' tracks the sampled reference, 'nominal' the MPPI plan
         self.declare_parameter('tracker_reference', 'spline')
         self.tracker_reference = self.get_parameter('tracker_reference').value
-        if self.tracker_reference not in ('spline', 'nominal'):
-            raise ValueError('tracker_reference must be spline or nominal')
+        # corridor: hybrid MPPI-MPC, the MPC tracks the race line inside a corridor
+        # around the MPPI plan and its solution warm-starts the next MPPI step
+        if self.tracker_reference not in ('spline', 'nominal', 'corridor'):
+            raise ValueError('tracker_reference must be spline, nominal or corridor')
         self.tracker = self._create_tracker()
         self._last_tracker_action = np.zeros(2)
         self._last_drive_command = np.zeros(2)  # [steering, speed setpoint]
@@ -589,7 +629,9 @@ class MPPI(Node):
             middle=(1.5, 1.0),
             resolution=0.05,
             inflation_radius=0.15,
-            distance_cap=0.25,
+            # corridor balls need clearance up to r_max plus the car's radius (0.15)
+            distance_cap=(max(0.25, self.config.CORRIDOR_R_MAX + 0.15)
+                          if self.tracker_reference == 'corridor' else 0.25),
         )
         self.grid = None
         self._grid_frames = None
@@ -807,27 +849,46 @@ class MPPI(Node):
 
     def _track_and_publish(self, observation, now):
         """Plan on GPU, track on CPU, then publish one command."""
-        result, nominal = tracking_control_step(
-            self.control_state, observation, self.course, self.grid,
-            self.config,
-            export_top_paths=self.publish_top_paths_enabled)
+        planning = observation._replace(x0=np.asarray(compensate_delay(
+            observation.x0, self._last_tracker_action, self.config), dtype=np.float32))
+        result, nominal, corridor = self._plan_for_tracker(planning, observation.x0)
         self.control_state, self.grid = result.state, result.grid
         self._publish_occupancy_grid(observation, now)
-        states, controls, reference = jax.device_get(
-            (nominal, result.state.U, result.reference))
-        target = reference if self.tracker_reference == 'spline' else None
+        states, controls, reference, corridor = jax.device_get(
+            (nominal, result.state.U, result.reference, corridor))
+        target = None if self.tracker_reference == 'nominal' else reference
         try:
             tracked = self.tracker.solve(
-                observation.x0, states, controls, self._last_tracker_action, target)
+                planning.x0, states, controls, self._last_tracker_action, target, corridor)
         except (RuntimeError, ValueError) as exc:
             self.get_logger().error(f'Tracker rejected command: {exc}', throttle_duration_sec=1.0)
             self._publish_stop(now)
             return
         self._last_tracker_action = tracked[0].copy()
+        self._feed_back_smoothed(tracked, corridor)
         self._publish_drive(tracked[0], observation.x0, now)
         if self.publish_selected_paths_enabled:
             self.path_publisher.history.try_record(states[:, :2], now.nanoseconds)
         self._publish_top_paths(result.top_paths, now)
+
+    def _plan_for_tracker(self, planning, scan_pose):
+        """One compiled dispatch: MPPI, plus the corridor in corridor mode."""
+        if self.tracker_reference == 'corridor':
+            return corridor_control_step(
+                self.control_state, planning, self.course, self.grid, self.config,
+                np.asarray(scan_pose, dtype=np.float32),
+                export_top_paths=self.publish_top_paths_enabled)
+        result, nominal = tracking_control_step(
+            self.control_state, planning, self.course, self.grid, self.config,
+            export_top_paths=self.publish_top_paths_enabled)
+        return result, nominal, None
+
+    def _feed_back_smoothed(self, tracked, corridor):
+        """Corridor mode (paper Alg. 1): the smoothed sequence is the next MPPI mean."""
+        if corridor is None:
+            return
+        self.control_state = self.control_state._replace(
+            U=jnp.asarray(tracked, dtype=self.control_state.U.dtype))
 
     def _prepare_control_observation(self, now):
         """Validate sensors and compute host-side timing/reset policy."""

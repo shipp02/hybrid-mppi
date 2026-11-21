@@ -42,6 +42,9 @@ class MPPIConfig:
     # MPC weight on steering change with a corridor; higher is gentler and more robust
     # to command delay (the race-line target corrects firmly)
     CORRIDOR_STEER_RATE_WEIGHT: float = 10.0
+    # predict the measured state this far ahead [s] with the applied command, so plans
+    # start where the car is when the new command lands (compute delay)
+    DELAY_COMPENSATION: float = 0.0
     # ---------------------------------------------------
 
     WB: float = 0.33  # Wheelbase [m]
@@ -74,8 +77,8 @@ class MPPIConfig:
         """Reject unusable dynamic settings before tracing any rollout."""
         import math
 
-        if self.CORRIDOR_R_MAX <= 0 or self.CORRIDOR_SQP_ITERS < 1:
-            raise ValueError('corridor r_max and solver iterations must be positive')
+        if self.CORRIDOR_R_MAX <= 0 or self.CORRIDOR_SQP_ITERS < 1 or self.DELAY_COMPENSATION < 0:
+            raise ValueError('corridor r_max and solver iterations must be positive, delay >= 0')
         if self.DYNAMICS not in ('kinematic', 'dynamic'):
             raise ValueError('dynamics must be kinematic or dynamic')
         if self.REFERENCE not in ('quintic', 'linear'):
