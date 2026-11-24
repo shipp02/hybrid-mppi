@@ -60,7 +60,7 @@ def dynamics(x, u, cfg):
     return jnp.array([
         v * jnp.cos(yaw),
         v * jnp.sin(yaw),
-        v * jnp.tan(delta) / cfg.WB,
+        v * jnp.tan(delta) * cfg.STEERING_CURVATURE_GAIN / cfg.WB,
         a
     ])
 
@@ -105,7 +105,17 @@ def step(x, u, cfg):
     return x_next.at[3].set(jnp.clip(x_next[3], cfg.MIN_SPEED, cfg.MAX_SPEED))
 
 
-def simulate(x0, U, cfg):
+def apply_steering_delay(U, steering_prefix, steps):
+    """Convert planned steering commands to the inputs applied by the vehicle."""
+    if steps == 0:
+        return U
+    if steering_prefix is None or steering_prefix.shape != (steps,):
+        raise ValueError('steering prefix must contain one command per delay step')
+    applied = jnp.concatenate((steering_prefix, U[:-steps, 1]))
+    return U.at[:, 1].set(applied)
+
+
+def simulate(x0, U, cfg, steering_prefix=None):
     """
     Simulate one control sequence from x0
     :param x0: initial state, shape (NX,)
@@ -119,12 +129,13 @@ def simulate(x0, U, cfg):
         next_state = step(carry, u, cfg)
         return next_state, next_state
 
-    _, states = jax.lax.scan(f, x0, U)
+    applied = apply_steering_delay(U, steering_prefix, cfg.steering_delay_steps)
+    _, states = jax.lax.scan(f, x0, applied)
 
     return jnp.concatenate((x0[jnp.newaxis, :], states), axis=0)
 
 
-def rollout(x0, U, cfg):
+def rollout(x0, U, cfg, steering_prefix=None):
     """
     Simulate all T sampled control sequences from x0, in parallel
     :param x0: initial state, shape (NX,)
@@ -133,7 +144,7 @@ def rollout(x0, U, cfg):
     """
     # TODO: vectorize simulate() over the first axis of U with jax.vmap
     #       (its in_axes say which axis of each argument to map over, None for none)
-    return jax.vmap(simulate, in_axes=(None, 0, None))(x0, U, cfg)
+    return jax.vmap(simulate, in_axes=(None, 0, None, None))(x0, U, cfg, steering_prefix)
 
 
 def trajectory_to_car_frame(ref_traj, x, y, yaw):
@@ -219,8 +230,7 @@ def cost_components(X, U, ref, cfg, grid):
 
 
 def total_cost(parts):
-    return (parts['tracking'] + parts['control'] + parts['control_change']
-            + parts['obstacle'] + parts['envelope'])
+    return (parts['tracking'] + parts['control'] + parts['control_change'] + parts['obstacle'])
 
 
 class TopPaths(NamedTuple):
@@ -303,11 +313,12 @@ def sample_rollout_controls(key, U, U_std, x0, cfg):
     return samples
 
 
-def mppi_update(key, U, U_std, x0, ref, cfg, grid, *, export_top_paths=False):
+def mppi_update(key, U, U_std, x0, ref, cfg, grid, *, steering_prefix=None,
+                export_top_paths=False):
     U_samples = sample_rollout_controls(key, U, U_std, x0, cfg)
 
     # 2. Simulate: roll out all T sequences from x0
-    X_samples = rollout(x0, U_samples, cfg)
+    X_samples = rollout(x0, U_samples, cfg, steering_prefix)
 
     parts = jax.vmap(cost_components, in_axes=(0, 0, None, None, None))(
         X_samples, U_samples, ref, cfg, grid)
@@ -345,15 +356,16 @@ def mppi_update(key, U, U_std, x0, ref, cfg, grid, *, export_top_paths=False):
 
 
 @partial(jax.jit, static_argnames=("cfg",))
-def mppi_step(key, U, x0, ref, cfg, grid):
+def mppi_step(key, U, x0, ref, cfg, grid, *, steering_prefix=None):
     U_std = jnp.broadcast_to(jnp.array(cfg.U_STD), (cfg.H, cfg.NU))
-    U_new, _, X_samples, weights = mppi_update(key, U, U_std, x0, ref, cfg, grid)
+    U_new, _, X_samples, weights = mppi_update(
+        key, U, U_std, x0, ref, cfg, grid, steering_prefix=steering_prefix)
     return U_new, X_samples, weights
 
 
 @partial(jax.jit, static_argnames=("cfg",))
-def mppi_step_cov(key, U, U_std, x0, ref, cfg, grid):
-    return mppi_update(key, U, U_std, x0, ref, cfg, grid)
+def mppi_step_cov(key, U, U_std, x0, ref, cfg, grid, *, steering_prefix=None):
+    return mppi_update(key, U, U_std, x0, ref, cfg, grid, steering_prefix=steering_prefix)
 
 
 class ControllerState(NamedTuple):
@@ -368,6 +380,7 @@ class ControlObservation(NamedTuple):
     elapsed: jax.Array
     reset: jax.Array
     range_max: jax.Array = np.float32(np.inf)
+    steering_prefix: jax.Array | None = None
 
 
 class OptimizationResult(NamedTuple):
@@ -409,24 +422,24 @@ def build_reference(x0, course, cfg):
         max_accel=cfg.MAX_ACCEL)
 
 
-def optimize_controls(state, x0, reference, grid, cfg, export_top_paths=False):
+def optimize_controls(state, observation, reference, grid, cfg, export_top_paths=False):
     """Own sampling RNG advancement and fixed/adaptive covariance policy."""
     key, sample_key = jax.random.split(state.key)
     outputs = mppi_update(
-        sample_key, state.U, state.U_std, x0, reference, cfg, grid,
-        export_top_paths=export_top_paths)
+        sample_key, state.U, state.U_std, observation.x0, reference, cfg, grid,
+        steering_prefix=observation.steering_prefix, export_top_paths=export_top_paths)
     U, updated_std, samples, weights = outputs[:4]
     top_paths = outputs[4] if export_top_paths else None
     U_std = updated_std if cfg.COV_UPDATE else state.U_std
     return OptimizationResult(ControllerState(key, U, U_std), samples, weights, top_paths)
 
 
-def select_control_outputs(solution, x0, grid, cfg, export_path):
+def select_control_outputs(solution, observation, grid, cfg, export_path):
     """Export only selected XY, reusing the nominal required by dynamic checks."""
     path_xy = None
     feasible = jnp.bool_(True)
     if export_path or cfg.DYNAMICS == 'dynamic':
-        nominal = simulate(x0, solution.state.U, cfg)
+        nominal = simulate(observation.x0, solution.state.U, cfg, observation.steering_prefix)
         if cfg.DYNAMICS == 'dynamic':
             feasible = db.trajectory_is_feasible(nominal, solution.state.U, cfg)
         if export_path:
@@ -444,10 +457,8 @@ def control_step(state, observation, course, grid, cfg, *, export_path=False,
         observation.ranges, observation.range_max,
         pose=observation.x0[:3], reset=observation.reset)
     reference = build_reference(observation.x0, course, cfg)
-    solution = optimize_controls(
-        state, observation.x0, reference, grid, cfg, export_top_paths)
-    return select_control_outputs(
-        solution, observation.x0, grid, cfg, export_path)
+    solution = optimize_controls(state, observation, reference, grid, cfg, export_top_paths)
+    return select_control_outputs(solution, observation, grid, cfg, export_path)
 
 
 @partial(jax.jit, static_argnames=("cfg", "export_top_paths"))
@@ -471,6 +482,38 @@ def calc_waypoint_yaw(x, y):
     yaw = np.arctan2(delta[:, 1], delta[:, 0])
     return np.append(yaw, yaw[0]) if repeated_endpoint else yaw
 
+class SentSteeringHistory:
+    """Retain the delay window and the command already active at its start."""
+
+    def __init__(self, steps, dt):
+        self._steps = steps
+        self._step_ns = round(dt * 1e9)
+        self._commands = []
+
+    def record(self, stamp_ns, steering):
+        commands = self._commands
+        if commands and stamp_ns < commands[-1][0]:
+            commands.clear()
+        if commands and stamp_ns == commands[-1][0]:
+            commands[-1] = (stamp_ns, steering)
+        else:
+            commands.append((stamp_ns, steering))
+        cutoff = stamp_ns - self._steps * self._step_ns
+        while len(commands) > 1 and commands[1][0] <= cutoff:
+            commands.pop(0)
+
+    def prefix_at(self, stamp_ns):
+        prefix = np.zeros(self._steps, dtype=np.float32)
+        if not self._commands or stamp_ns < self._commands[-1][0]:
+            return prefix
+        stamps, angles = zip(*self._commands)
+        queries = stamp_ns - self._step_ns * np.arange(self._steps, 0, -1)
+        indices = np.searchsorted(stamps, queries, side='right') - 1
+        known = indices >= 0
+        prefix[known] = np.asarray(angles, dtype=np.float32)[indices[known]]
+        return prefix
+
+
 class MPPI(Node):
     """
     Implement Kinematic MPPI on the car
@@ -485,7 +528,8 @@ class MPPI(Node):
         track = self.get_parameter('track').value
         
         overrides = {}
-        for field in ('MAX_SPEED', 'LAMBDA', 'INTEGRATOR', 'SAMPLING', 'COV_UPDATE',
+        for field in ('MAX_SPEED', 'STEERING_DELAY_S', 'STEERING_CURVATURE_GAIN',
+                      'LAMBDA', 'INTEGRATOR', 'SAMPLING', 'COV_UPDATE',
                       'DYNAMICS', 'MASS', 'YAW_INERTIA', 'WB', 'FRONT_LENGTH', 'TIRE_MU',
                       'FRONT_STIFFNESS', 'REAR_STIFFNESS', 'FRONT_DRIVE_FRACTION',
                       'SPEED_RESPONSE_TIME', 'MAX_STEER_RATE', 'DYNAMIC_SUBSTEPS',
@@ -502,6 +546,15 @@ class MPPI(Node):
         self.declare_parameter('tracker', 'none')
         self.declare_parameter('tracker_prebuilt_dir', '')
         self.declare_parameter('tracker_max_steer_rate', float(np.pi))
+        if self.get_parameter('tracker').value != 'none':
+            if self.config.STEERING_DELAY_S:
+                raise ValueError('steering_delay_s requires tracker:=none')
+            if self.config.STEERING_CURVATURE_GAIN != 1.0:
+                raise ValueError('steering_curvature_gain requires tracker:=none')
+        delay_steps = self.config.steering_delay_steps
+        self._steering_history = SentSteeringHistory(delay_steps, self.config.DT)
+        self.get_logger().info(
+            f'Steering delay: {delay_steps * self.config.DT:.3f} s ({delay_steps} rollout steps)')
         self.tracker = self._create_tracker()
         self._last_tracker_action = np.zeros(2)
         self._last_drive_command = np.zeros(2)  # [steering, speed setpoint]
@@ -672,6 +725,8 @@ class MPPI(Node):
             np.zeros(self.config.NX, dtype=np.float32),
             np.zeros(self.grid.spec.num_beams, dtype=np.float32),
             np.float32(self.config.DT), np.bool_(False),
+            steering_prefix=(np.zeros(self.config.steering_delay_steps, dtype=np.float32)
+                             if self.config.steering_delay_steps else None),
         )
         if self.tracker is None:
             result = control_step(
@@ -815,9 +870,11 @@ class MPPI(Node):
             and np.hypot(*(x0[:2] - self.last_x0[:2])) > 1.0
         )
         self.last_x0 = x0.copy()
+        steering_prefix = (self._steering_history.prefix_at(now.nanoseconds)
+                           if self.config.steering_delay_steps else None)
         return ControlObservation(
             x0.astype(np.float32), ranges, np.float32(elapsed), np.bool_(reset),
-            np.float32(range_max))
+            np.float32(range_max), steering_prefix)
 
     def _observed_vehicle_state(self, odom):
         """Use latest published setpoints, not command state from an older odom tick."""
@@ -877,8 +934,14 @@ class MPPI(Node):
         )
 
         drive_msg.drive.speed = float(target_speed)
-        self._last_drive_command = np.array([float(action[1]), float(target_speed)])
-        self.drive_publisher.publish(drive_msg)
+        self._send_drive_command(drive_msg)
+
+    def _send_drive_command(self, msg):
+        publish_stamp = self.get_clock().now() if self.config.steering_delay_steps else None
+        self.drive_publisher.publish(msg)
+        self._last_drive_command = np.array([msg.drive.steering_angle, msg.drive.speed])
+        if publish_stamp is not None:
+            self._steering_history.record(publish_stamp.nanoseconds, msg.drive.steering_angle)
 
     def _log_control_stats(self, start):
         """Wall-clock hot-path timings, synchronized by the selected-action readback.
@@ -918,12 +981,11 @@ class MPPI(Node):
 
     def _publish_stop(self, stamp):
         self._last_tracker_action = np.zeros(2)
-        self._last_drive_command = np.zeros(2)
         msg = AckermannDriveStamped()
         msg.header.stamp = stamp.to_msg()
         msg.drive.speed = 0.0
         msg.drive.steering_angle = 0.0
-        self.drive_publisher.publish(msg)
+        self._send_drive_command(msg)
 
     def destroy_node(self):
         """Release the optional publisher process before shutting down ROS."""

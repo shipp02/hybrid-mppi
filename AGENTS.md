@@ -17,6 +17,13 @@
   validation. Do not claim unrun tests passed.
 - Do not include generated benchmark artifacts unless explicitly requested.
 
+## Car configuration
+
+- Put configurable real-car controller values in `config/car_config.yaml`. Keep
+  ROS parameter declarations and generic defaults in code, but use this YAML file
+  for car-specific settings and tuning rather than adding launch arguments for
+  each setting.
+
 ## Abstraction Levels and Separation of Concerns
 
 ### Principle

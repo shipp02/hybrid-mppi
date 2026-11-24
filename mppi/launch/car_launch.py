@@ -14,7 +14,7 @@ def launch_controller(context):
     parameter_types = {
         'track': str, 'tracker': str, 'dynamics': str,
         'publish_selected_paths': bool, 'publish_top_paths': bool, 'use_cpu': bool,
-        'horizon': int, 'max_speed': float,
+        'horizon': int, 'max_speed': float, 'steering_delay_s': float,
     }
     for name, value_type in parameter_types.items():
         argument = LaunchConfiguration(name)
@@ -31,15 +31,16 @@ def launch_controller(context):
 def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument(
-            'odom_topic', description='Car localization odometry topic'),
+            'odom_topic', default_value='/pf/pose/odom',
+            description='Override localization odometry topic (map frame, e.g. /pf/pose/odom)'),
         DeclareLaunchArgument(
             'config_file', default_value=os.path.join(
                 get_package_share_directory('mppi'), 'config', 'car_config.yaml'),
             description='Car ROS parameter file'),
         DeclareLaunchArgument(
-            'track', default_value='', description='Override waypoint track name'),
+            'track', default_value='levine_waypoints', description='Override waypoint track name'),
         DeclareLaunchArgument(
-            'tracker', default_value='', description='Override tracker: none or acados'),
+            'tracker', default_value='none', description='Override tracker: none or acados'),
         DeclareLaunchArgument(
             'dynamics', default_value='', description='Override dynamics: kinematic or dynamic'),
         DeclareLaunchArgument('publish_selected_paths', default_value=''),
@@ -47,5 +48,8 @@ def generate_launch_description():
         DeclareLaunchArgument('use_cpu', default_value=''),
         DeclareLaunchArgument('horizon', default_value=''),
         DeclareLaunchArgument('max_speed', default_value=''),
+        DeclareLaunchArgument(
+            'steering_delay_s', default_value='',
+            description='Steering dead time in seconds (direct kinematic MPPI only)'),
         OpaqueFunction(function=launch_controller),
     ])

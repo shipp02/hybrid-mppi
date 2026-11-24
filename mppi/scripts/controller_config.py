@@ -1,4 +1,5 @@
 """Shared controller defaults for ROS execution and offline solver generation."""
+import math
 from dataclasses import dataclass
 
 
@@ -9,7 +10,7 @@ class MPPIConfig:
     NU: int = 2  # length of input vector: u = [a, delta]
     T: int = 1024  # number of sampled control sequences
     H: int = 40  # horizon length
-    DT: float = 0.05  # time step [s]
+    DT: float = 0.050  # time step [s]
     INTEGRATOR: str = "rk4"  # "euler" or "rk4" (bonus)
     SAMPLING: str = "uniform"  # "clip", or bonus: "truncated" (normal) or "uniform"
     COV_UPDATE: bool = True  # bonus: adapt the sampling std of each step
@@ -22,15 +23,17 @@ class MPPIConfig:
     U_STD_MIN: tuple = (0.3, 0.03)  # covariance update: floor of the std
     COV_ALPHA: float = 0.5  # covariance update: blend of the new std
     # cost() weights the position error along the reference (lag) and across it (lateral)
-    Q: tuple = (5.0, 5.0, 1.0, 1.0)  # state error cost [x, y, yaw, v]
-    Qf: tuple = (5.0, 5.0, 1.0, 1.0)  # final state error cost [x, y, yaw, v]
-    R: tuple = (0.01, 0.01)  # input cost [a, delta]
+    Q: tuple = (1.0, 20.0, 2.0, 1.0)  # state error cost [lag, lateral, yaw, v]
+    Qf: tuple = (2.0, 40.0, 4.0, 1.0)
+    R: tuple = (0.01, 1.0)  # input cost [a, delta]
     Rd: tuple = (0.01, 1.0)  # input difference cost [a, delta]
     # ---------------------------------------------------
 
     WB: float = 0.33  # Wheelbase [m]
-    MIN_STEER: float = -0.4189  # minimum steering angle [rad]
-    MAX_STEER: float = 0.4189  # maximum steering angle [rad]
+    STEERING_CURVATURE_GAIN: float = 1.0  # Applied to tan(steering) / WB in direct kinematic MPPI
+    STEERING_DELAY_S: float = 0.0  # Steering dead time for direct kinematic MPPI
+    MIN_STEER: float = -0.35  # minimum steering angle [rad]
+    MAX_STEER: float = 0.35  # maximum steering angle [rad]
     MIN_ACCEL: float = -3.0  # minimum acceleration [m/ss]
     MAX_ACCEL: float = 3.0  # maximum acceleration [m/ss]
     MIN_SPEED: float = 0.0  # minimum speed [m/s]
@@ -54,12 +57,25 @@ class MPPIConfig:
     MAX_YAW_RATE: float = 5.0  # rad/s
     ENVELOPE_WEIGHT: float = 100.0
 
-    def __post_init__(self):
-        """Reject unusable dynamic settings before tracing any rollout."""
-        import math
+    @property
+    def steering_delay_steps(self):
+        return math.floor(self.STEERING_DELAY_S / self.DT + 0.5)
 
+    def __post_init__(self):
+        """Reject unusable settings before tracing any rollout."""
         if self.DYNAMICS not in ('kinematic', 'dynamic'):
             raise ValueError('dynamics must be kinematic or dynamic')
+        if not math.isfinite(self.STEERING_CURVATURE_GAIN) or self.STEERING_CURVATURE_GAIN <= 0:
+            raise ValueError('steering_curvature_gain must be finite and positive')
+        if self.STEERING_CURVATURE_GAIN != 1.0 and self.DYNAMICS != 'kinematic':
+            raise ValueError('steering_curvature_gain requires kinematic MPPI')
+        if not math.isfinite(self.STEERING_DELAY_S) or self.STEERING_DELAY_S < 0:
+            raise ValueError('steering_delay_s must be finite and nonnegative')
+        if self.STEERING_DELAY_S:
+            if self.DYNAMICS != 'kinematic':
+                raise ValueError('steering_delay_s requires kinematic MPPI')
+            if self.STEERING_DELAY_S >= self.H * self.DT or self.steering_delay_steps >= self.H:
+                raise ValueError('steering delay must be shorter than the rollout horizon')
         object.__setattr__(self, 'NX', 8 if self.DYNAMICS == 'dynamic' else 4)
         if self.DYNAMICS == 'kinematic':
             return

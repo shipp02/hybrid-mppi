@@ -1,4 +1,11 @@
 mppi_node:
   ros__parameters:
-    track: waypoints_20261026_185546.csv
-    max_speed: 2.0
+    track: levine_waypoints.csv
+    max_speed: 3.0
+    # map-frame localization (particle filter); not /odom, which is wheel odometry
+    odom_topic: /pf/pose/odom
+    publish_selected_paths: true
+    publish_occupancy_grid: true
+    steering_delay_s: 0.15
+    # 67-inch modeled turning diameter at ±0.35 rad; 1.0 is nominal.
+    steering_curvature_gain: 1.09245
