@@ -67,6 +67,17 @@ class PassOnOneSideTest(unittest.TestCase):
         U = self.choose(self.straight, samples, [1.0, 1.0])
         np.testing.assert_allclose(U, self.straight)
 
+    def test_colliding_plan_brakes_before_contact(self):
+        U = c.brake_before_collision(self.straight, self.x0, self.cfg, self.grid)
+        # 3 m/s, contact ~1.8 m ahead (inflated object at 2 m): v^2 / 2(d - margin) ~ 3 m/s^2
+        self.assertTrue(bool(jnp.all(U[:, 0] < -2.0)))
+        np.testing.assert_allclose(U[:, 1], self.straight[:, 1])
+
+    def test_clear_plan_is_not_braked(self):
+        U = self.steer(0.35)
+        np.testing.assert_allclose(c.brake_before_collision(U, self.x0, self.cfg, self.grid), U)
+
+
     def test_masked_weights_ignore_excluded_samples(self):
         S = jnp.array([[1.0, 1.0], [2.0, 2.0], [3.0, 3.0]])
         w = c.mppi_weights(S, self.cfg, jnp.array([False, True, True]))

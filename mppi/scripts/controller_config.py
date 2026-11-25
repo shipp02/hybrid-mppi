@@ -40,6 +40,12 @@ class MPPIConfig:
     MAX_SPEED: float = 2.0  # maximum speed [m/s]
     MAX_SPEED_LEAD: float = 1.0  # kinematic: setpoint may exceed measured speed by this [m/s]
 
+    # Obstacles (kinematic)
+    BODY_OFFSETS: tuple = (0.0,)  # points along the body checked for collision [m ahead of the pose]
+    STOP_MARGIN: float = 0.3  # kinematic: a colliding plan brakes to stop this far before contact [m]
+    NEAR_OBSTACLE_SPEED: float = 0.0  # speed cap at the inflation edge, 0 = off [m/s]
+    NEAR_OBSTACLE_WEIGHT: float = 0.0  # cost of exceeding that cap
+
     # Dynamic bicycle starting estimates, NOT identified real-car parameters.
     MASS: float = 3.5  # kg
     YAW_INERTIA: float = 0.05  # kg m^2
@@ -70,6 +76,12 @@ class MPPIConfig:
             raise ValueError('horizon and num_samples must be positive')
         if not math.isfinite(self.MAX_SPEED_LEAD) or self.MAX_SPEED_LEAD <= 0:
             raise ValueError('max_speed_lead must be finite and positive')
+        if not self.BODY_OFFSETS or not all(math.isfinite(d) for d in self.BODY_OFFSETS):
+            raise ValueError('body_offsets must be a non-empty list of finite numbers')
+        if not math.isfinite(self.STOP_MARGIN) or self.STOP_MARGIN < 0:
+            raise ValueError('stop_margin must be finite and nonnegative')
+        if self.NEAR_OBSTACLE_SPEED < 0 or self.NEAR_OBSTACLE_WEIGHT < 0:
+            raise ValueError('near_obstacle_speed and near_obstacle_weight must be nonnegative')
         if not math.isfinite(self.STEERING_CURVATURE_GAIN) or self.STEERING_CURVATURE_GAIN <= 0:
             raise ValueError('steering_curvature_gain must be finite and positive')
         if self.STEERING_CURVATURE_GAIN != 1.0 and self.DYNAMICS != 'kinematic':
