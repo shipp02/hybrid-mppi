@@ -16,6 +16,7 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPo
 from geometry_msgs.msg import Point
 from visualization_msgs.msg import Marker
 from rclpy.executors import ExternalShutdownException
+from std_msgs.msg import Float32
 from utils import calc_interpolated_ref_trajectory_gpu, shift_sequence
 import occupancy_grid as og
 import dynamic_bicycle as db
@@ -511,6 +512,35 @@ def config_value(name, default, value):
     return type(default)(value)
 
 
+def route_speed_at(waypoints, x, y):
+    """Target speed of the waypoint nearest to (x, y); waypoints are [x, y, yaw, v]."""
+    nearest = np.argmin((waypoints[:, 0] - x) ** 2 + (waypoints[:, 1] - y) ** 2)
+    return float(waypoints[nearest, 3])
+
+
+def stamp_age_ms(now_ns, stamp):
+    """Milliseconds from a message header stamp to now (same system clock)."""
+    if stamp is None:
+        return float('nan')
+    return (now_ns - (stamp.sec * 1_000_000_000 + stamp.nanosec)) * 1e-6
+
+
+class ControlMetricsPublisher:
+    """One std_msgs/Float32 topic per metric under /mppi/metrics, for plots and bags."""
+
+    NAMES = ('route_speed', 'commanded_speed', 'measured_speed',
+             'compute_ms', 'period_ms', 'odom_age_ms', 'scan_age_ms')
+
+    def __init__(self, node):
+        self._publishers = {
+            name: node.create_publisher(Float32, f'/mppi/metrics/{name}', 10)
+            for name in self.NAMES}
+
+    def publish(self, values):
+        for name, value in values.items():
+            self._publishers[name].publish(Float32(data=float(value)))
+
+
 class SentSteeringHistory:
     """Retain the delay window and the command already active at its start."""
 
@@ -597,6 +627,8 @@ class MPPI(Node):
         )
         self._last_control_time = None
         self._latest_odom = None
+        self._latest_odom_stamp = None
+        self.metrics = ControlMetricsPublisher(self)
         self._odom_child_frame = ''
         self._latest_scan = None
         self.tf_buffer = Buffer()
@@ -667,16 +699,28 @@ class MPPI(Node):
         self.get_logger().info(f'MPPI initialized on {track}; waiting for LiDAR extrinsics')
 
     def _publish_waypoints(self):
-        """Publish static course once; retain it for transient-local late subscribers."""
+        """Publish the course now and once per second with a fresh stamp.
+
+        Transient-local serves late subscribers; the periodic copy keeps the course
+        visible after seeking in a recorded bag and when the viewer follows a TF frame.
+        """
         qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST, depth=1,
             reliability=ReliabilityPolicy.RELIABLE,
             durability=DurabilityPolicy.TRANSIENT_LOCAL,
         )
         self.waypoints_publisher = self.create_publisher(Marker, '/mppi/waypoints', qos)
+        self.waypoints_marker = self._waypoints_marker()
+        self._republish_waypoints()
+        self.waypoints_timer = self.create_timer(1.0, self._republish_waypoints)
+
+    def _republish_waypoints(self):
+        self.waypoints_marker.header.stamp = self.get_clock().now().to_msg()
+        self.waypoints_publisher.publish(self.waypoints_marker)
+
+    def _waypoints_marker(self):
         marker = Marker()
         marker.header.frame_id = self.get_parameter('path_frame').value
-        marker.header.stamp = self.get_clock().now().to_msg()
         marker.ns = 'waypoints'
         marker.id = 0
         marker.type = Marker.POINTS
@@ -689,7 +733,7 @@ class MPPI(Node):
         # Default zero lifetime keeps the marker visible without refreshing it.
         marker.points = [Point(x=float(x), y=float(y), z=0.0)
                          for x, y in self.waypoints[:, :2]]
-        self.waypoints_publisher.publish(marker)
+        return marker
 
     def _create_tracker(self):
         """Optional host solver; default MPPI path needs no acados installation."""
@@ -772,6 +816,7 @@ class MPPI(Node):
             self.get_logger().error(str(exc), throttle_duration_sec=1.0)
             self._publish_stop(self.get_clock().now())
             return
+        self._latest_odom_stamp = msg.header.stamp
         self._odom_child_frame = msg.child_frame_id if msg.child_frame_id else 'odom'
 
     def scan_callback(self, msg):
@@ -828,7 +873,22 @@ class MPPI(Node):
             self._publish_control_result(result, observation, now)
         else:
             self._track_and_publish(observation, now)
+        self._publish_metrics(observation, control_start, now)
         self._log_control_stats(control_start)
+
+    def _publish_metrics(self, observation, control_start, now):
+        """Speed tracking and latency of this tick; runs before stats advance the period."""
+        x0 = observation.x0
+        last_start = self._last_control_start
+        self.metrics.publish({
+            'route_speed': route_speed_at(self.waypoints, x0[0], x0[1]),
+            'commanded_speed': self._last_drive_command[1],
+            'measured_speed': np.hypot(x0[3], x0[4]) if self.config.DYNAMICS == 'dynamic' else x0[3],
+            'compute_ms': (time.perf_counter() - control_start) * 1e3,
+            'period_ms': (control_start - last_start) * 1e3 if last_start is not None else float('nan'),
+            'odom_age_ms': stamp_age_ms(now.nanoseconds, self._latest_odom_stamp),
+            'scan_age_ms': stamp_age_ms(now.nanoseconds, self._latest_scan[6]),
+        })
 
     def _track_and_publish(self, observation, now):
         """Plan on GPU, track on CPU, then publish one command."""
