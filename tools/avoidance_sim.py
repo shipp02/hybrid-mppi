@@ -1,9 +1,10 @@
 """Closed-loop obstacle avoidance check, without ROS or the car.
 
-A straight corridor with a 30 cm box on the route; the car starts 4 m before it.
+A straight corridor with a 30 cm box on the route (default 5 m ahead of the start).
 Each tick simulates the LiDAR, runs the real control_step with the given config,
 and moves the car with the controller's own kinematic model. Prints, per seed,
-whether the car got past the box and the smallest gap between body and box.
+whether the car got past the box, the smallest body gap and how often the
+steering switched sides (dithering). The steering delay from the config is simulated.
 
     python3 tools/avoidance_sim.py                        # config/car_config.yaml
     python3 tools/avoidance_sim.py --config my.yaml --box-left 0.25 --seeds 5
@@ -37,8 +38,9 @@ def load_config(path):
         name = c.config_parameter_name(field.name)
         if name in params:
             values[field.name] = c.config_value(name, field.default, params[name])
-    # Delay compensation needs a command history this simple loop does not keep.
-    values.update(STEERING_DELAY_S=0.0, STEERING_CURVATURE_GAIN=1.0)
+    # The simulated car is the controller's own model, so the measured curvature gain
+    # of the real steering does not apply; the steering delay is simulated.
+    values.update(STEERING_CURVATURE_GAIN=1.0)
     cfg = replace(c.MPPIConfig(), **values)
     return cfg, float(params.get('obstacle_inflation', 0.22))
 
@@ -72,7 +74,14 @@ def body_gap(x, y, yaw, box):
     return float(np.min(np.maximum(np.abs(forward) - HALF_LENGTH, np.abs(left) - HALF_WIDTH)))
 
 
-def drive_past_box(cfg, inflation, box, wall, speed, seed, max_steps=200):
+def steering_reversals(commands, threshold=0.05):
+    """How often the steering command changes side (left/right dithering)."""
+    signs = np.sign([s for s in commands if abs(s) > threshold])
+    return int(np.sum(signs[1:] != signs[:-1]))
+
+
+def drive_past_box(cfg, inflation, box, wall, speed, seed, max_steps=250):
+    """Returns (passed, smallest body gap, lateral position at the box, steering reversals)."""
     xs = np.arange(-5.0, 40.0, 0.05)
     course = jnp.asarray(np.column_stack((xs, 0 * xs, 0 * xs, 0 * xs + speed)).astype(np.float32))
     grid = c.og.OccupancyGrid.create(
@@ -81,25 +90,34 @@ def drive_past_box(cfg, inflation, box, wall, speed, seed, max_steps=200):
     state = c.ControllerState(jax.random.PRNGKey(seed), jnp.zeros((cfg.H, cfg.NU)),
                               jnp.broadcast_to(jnp.array(cfg.U_STD), (cfg.H, cfg.NU)))
     x = np.array([0.0, 0.0, 0.0, speed], np.float32)
-    gap, side = np.inf, 0.0
+    delay = cfg.steering_delay_steps
+    sent = [0.0] * delay            # steering commands not yet applied by the car
+    gap, side, commands = np.inf, 0.0, []
     for _ in range(max_steps):
+        prefix = np.array(sent[-delay:], np.float32) if delay else None
         observation = c.ControlObservation(
-            x.copy(), lidar(*x[:3], box, wall), np.float32(cfg.DT), np.bool_(False))
+            x.copy(), lidar(*x[:3], box, wall), np.float32(cfg.DT), np.bool_(False),
+            np.float32(10.0), prefix)
         result = c.control_step(state, observation, course, grid, cfg)
         state, grid = result.state, result.grid
-        x = np.asarray(c.step(jnp.asarray(x), result.action, cfg), np.float32)
+        steer = float(result.action[1])
+        applied = sent[-delay] if delay else steer
+        sent.append(steer)
+        commands.append(steer)
+        x = np.asarray(c.step(jnp.asarray(x), jnp.array([result.action[0], applied]), cfg), np.float32)
         gap = min(gap, body_gap(*x[:3], box))
         if abs(x[0] - box[0]) < 0.1:
             side = float(x[1])
         if x[0] > box[0] + 1.5:
-            return True, gap, side
-    return False, gap, side
+            return True, gap, side, steering_reversals(commands)
+    return False, gap, side, steering_reversals(commands)
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
     parser.add_argument('--config', default=str(ROOT / 'config' / 'car_config.yaml'))
     parser.add_argument('--box-left', type=float, default=0.0, help='box offset from the route [m]')
+    parser.add_argument('--box-ahead', type=float, default=5.0, help='box distance from the start [m]')
     parser.add_argument('--wall', type=float, default=1.4, help='corridor half width [m]')
     parser.add_argument('--speed', type=float, default=1.5, help='route speed [m/s]')
     parser.add_argument('--seeds', type=int, default=3)
@@ -107,15 +125,17 @@ def main():
 
     cfg, inflation = load_config(args.config)
     cfg = replace(cfg, MAX_SPEED=max(cfg.MAX_SPEED, args.speed))
-    print(f'inflation {inflation} m, q {cfg.Q}, box {args.box_left:+.2f} m from route, '
-          f'corridor +-{args.wall} m, {args.speed} m/s')
+    print(f'inflation {inflation} m, q {cfg.Q}, steering delay {cfg.steering_delay_steps * cfg.DT:.2f} s, '
+          f'box {args.box_left:+.2f} m from route at {args.box_ahead} m, corridor +-{args.wall} m, '
+          f'{args.speed} m/s')
     passed = 0
     for seed in range(args.seeds):
-        ok, gap, side = drive_past_box(cfg, inflation, (4.0, args.box_left), args.wall, args.speed, seed)
+        ok, gap, side, reversals = drive_past_box(
+            cfg, inflation, (args.box_ahead, args.box_left), args.wall, args.speed, seed)
         passed += ok and gap > 0
         verdict = 'passed' if ok and gap > 0 else 'CONTACT' if gap <= 0 else 'stopped'
         print(f'  seed {seed}: {verdict:8s} min body gap {gap * 100:5.1f} cm, '
-              f'lateral position at the box {side:+.2f} m')
+              f'lateral position at the box {side:+.2f} m, steering reversals {reversals}')
     print(f'{passed}/{args.seeds} passed')
     return 0 if passed == args.seeds else 1
 
