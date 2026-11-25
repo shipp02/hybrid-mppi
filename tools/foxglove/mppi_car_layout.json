@@ -1,0 +1,99 @@
+{
+  "configById": {
+    "3D!mppi_map": {
+      "cameraState": {
+        "perspective": false,
+        "distance": 25,
+        "phi": 0,
+        "thetaOffset": 0,
+        "targetOffset": [0, 0, 0],
+        "target": [0, 0, 0],
+        "targetOrientation": [0, 0, 0, 1],
+        "fovy": 45,
+        "near": 0.5,
+        "far": 5000
+      },
+      "followMode": "follow-none",
+      "followTf": "map",
+      "scene": {},
+      "transforms": {},
+      "topics": {
+        "/map": { "visible": true, "colorMode": "map" },
+        "/scan": { "visible": true, "pointSize": 4, "colorMode": "flat", "flatColor": "#ff5a5aff" },
+        "/mppi/waypoints": { "visible": true },
+        "/mppi/selected_paths": { "visible": true },
+        "/mppi/top_paths": { "visible": true },
+        "/mppi/occupancy_grid": { "visible": true, "colorMode": "costmap" },
+        "/pf/viz/inferred_pose": { "visible": true, "type": "arrow" },
+        "/pf/viz/particles": { "visible": false },
+        "/pf/viz/fake_scan": { "visible": false }
+      },
+      "layers": {
+        "grid": {
+          "visible": true,
+          "layerId": "foxglove.Grid",
+          "frameId": "map",
+          "size": 40,
+          "divisions": 40,
+          "lineWidth": 1,
+          "color": "#80808040",
+          "position": [0, 0, 0],
+          "rotation": [0, 0, 0]
+        }
+      },
+      "publish": { "type": "pose_estimate", "poseTopic": "/initialpose", "pointTopic": "/clicked_point", "poseEstimateTopic": "/initialpose" },
+      "imageMode": {}
+    },
+    "Plot!mppi_speed": {
+      "title": "Speed [m/s]",
+      "paths": [
+        { "value": "/mppi/metrics/route_speed.data", "enabled": true, "timestampMethod": "receiveTime", "label": "route target" },
+        { "value": "/mppi/metrics/commanded_speed.data", "enabled": true, "timestampMethod": "receiveTime", "label": "commanded" },
+        { "value": "/mppi/metrics/measured_speed.data", "enabled": true, "timestampMethod": "receiveTime", "label": "measured (PF)" }
+      ],
+      "minYValue": 0,
+      "showXAxisLabels": true,
+      "showYAxisLabels": true,
+      "showLegend": true,
+      "legendDisplay": "top",
+      "showPlotValuesInLegend": true,
+      "isSynced": true,
+      "xAxisVal": "timestamp",
+      "followingViewWidth": 20,
+      "sidebarDimension": 240
+    },
+    "Plot!mppi_latency": {
+      "title": "Latency [ms] (control period target 50)",
+      "paths": [
+        { "value": "/mppi/metrics/compute_ms.data", "enabled": true, "timestampMethod": "receiveTime", "label": "compute" },
+        { "value": "/mppi/metrics/period_ms.data", "enabled": true, "timestampMethod": "receiveTime", "label": "loop period" },
+        { "value": "/mppi/metrics/odom_age_ms.data", "enabled": true, "timestampMethod": "receiveTime", "label": "pose age" },
+        { "value": "/mppi/metrics/scan_age_ms.data", "enabled": true, "timestampMethod": "receiveTime", "label": "scan age" }
+      ],
+      "minYValue": 0,
+      "showXAxisLabels": true,
+      "showYAxisLabels": true,
+      "showLegend": true,
+      "legendDisplay": "top",
+      "showPlotValuesInLegend": true,
+      "isSynced": true,
+      "xAxisVal": "timestamp",
+      "followingViewWidth": 20,
+      "sidebarDimension": 240
+    }
+  },
+  "globalVariables": {},
+  "userNodes": {},
+  "playbackConfig": { "speed": 1 },
+  "layout": {
+    "first": "3D!mppi_map",
+    "second": {
+      "first": "Plot!mppi_speed",
+      "second": "Plot!mppi_latency",
+      "direction": "column",
+      "splitPercentage": 50
+    },
+    "direction": "row",
+    "splitPercentage": 64
+  }
+}
