@@ -51,7 +51,7 @@ def generate_launch_description():
                 get_package_share_directory('hybrid_mppi'), 'config', 'car_config.yaml'),
             description='Car ROS parameter file'),
         DeclareLaunchArgument(
-            'track', default_value='levine_waypoints', description='Override waypoint track name'),
+            'track', default_value='', description='Override waypoint track name (default: car config)'),
         DeclareLaunchArgument(
             'tracker', default_value='none', description='Override tracker: none or acados'),
         DeclareLaunchArgument(
