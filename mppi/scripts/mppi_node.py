@@ -62,7 +62,7 @@ def dynamics(x, u, cfg):
     return jnp.array([
         v * jnp.cos(yaw),
         v * jnp.sin(yaw),
-        v * jnp.tan(delta) * cfg.STEERING_CURVATURE_GAIN / cfg.WB,
+        v * jnp.tan(delta + cfg.STEERING_OFFSET) * cfg.STEERING_CURVATURE_GAIN / cfg.WB,
         a
     ])
 
@@ -695,8 +695,8 @@ class MPPI(Node):
         if self.get_parameter('tracker').value != 'none':
             if self.config.STEERING_DELAY_S:
                 raise ValueError('steering_delay_s requires tracker:=none')
-            if self.config.STEERING_CURVATURE_GAIN != 1.0:
-                raise ValueError('steering_curvature_gain requires tracker:=none')
+            if self.config.STEERING_CURVATURE_GAIN != 1.0 or self.config.STEERING_OFFSET:
+                raise ValueError('steering_curvature_gain/steering_offset require tracker:=none')
         delay_steps = self.config.steering_delay_steps
         self._steering_history = SentSteeringHistory(delay_steps, self.config.DT)
         self.get_logger().info(

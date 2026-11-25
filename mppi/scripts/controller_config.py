@@ -32,6 +32,7 @@ class MPPIConfig:
     WB: float = 0.33  # Wheelbase [m]
     STEERING_CURVATURE_GAIN: float = 1.0  # Applied to tan(steering) / WB in direct kinematic MPPI
     STEERING_DELAY_S: float = 0.0  # Steering dead time for direct kinematic MPPI
+    STEERING_OFFSET: float = 0.0  # kinematic: wheels point this much left of the command [rad]
     MIN_STEER: float = -0.35  # minimum steering angle [rad]
     MAX_STEER: float = 0.35  # maximum steering angle [rad]
     MIN_ACCEL: float = -3.0  # minimum acceleration [m/ss]
@@ -80,6 +81,10 @@ class MPPIConfig:
             raise ValueError('stop_margin must be finite and nonnegative')
         if not math.isfinite(self.STEERING_CURVATURE_GAIN) or self.STEERING_CURVATURE_GAIN <= 0:
             raise ValueError('steering_curvature_gain must be finite and positive')
+        if not math.isfinite(self.STEERING_OFFSET) or abs(self.STEERING_OFFSET) > 0.1:
+            raise ValueError('steering_offset must be finite and within 0.1 rad')
+        if self.STEERING_OFFSET and self.DYNAMICS != 'kinematic':
+            raise ValueError('steering_offset requires kinematic MPPI')
         if self.STEERING_CURVATURE_GAIN != 1.0 and self.DYNAMICS != 'kinematic':
             raise ValueError('steering_curvature_gain requires kinematic MPPI')
         if not math.isfinite(self.STEERING_DELAY_S) or self.STEERING_DELAY_S < 0:
