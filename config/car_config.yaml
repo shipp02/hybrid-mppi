@@ -1,11 +1,151 @@
+# Real-car MPPI settings, loaded by launch/car_launch.py.
+#
+# Edit and restart the node: no rebuild is needed (colcon --symlink-install links
+# this file into install/). Try another set with config_file:=/path/to/copy.yaml.
+# Every MPPIConfig field (mppi/scripts/controller_config.py) can be set here by its
+# lower-case name (H is "horizon", T is "num_samples"); left out = code default.
+# Changing any value recompiles the controller on startup (a few seconds).
+#
+# Format: "what it is" / "tune" = how to change it / "effect" = what the car does.
 mppi_node:
   ros__parameters:
+
+    # ------------------------------------------------------------ route & speed
+    # Waypoint CSV in mppi/waypoints/ (x,y,v or x,y,yaw,v), in the PF map frame.
+    # Its v column is the target speed along the route.
     track: levine_real_smooth.csv
+    # Hard cap on the published speed [m/s]; the route speed is followed up to it.
+    #   tune: raise in 0.5 m/s steps once laps are clean at the current value.
+    #   effect: faster laps; above what the car can corner, it runs wide or slides.
     max_speed: 3.0
-    # map-frame localization (particle filter); not /odom, which is wheel odometry
+    # Floor on the published speed [m/s]. Keep 0: negative would plan reversing.
+    min_speed: 0.0
+
+    # ------------------------------------------------------------ localization & runtime
+    # Map-frame pose (particle filter). Not /odom, which is wheel odometry only.
     odom_topic: /pf/pose/odom
-    publish_selected_paths: true
-    publish_occupancy_grid: true
-    steering_delay_s: 0.15
-    # 67-inch modeled turning diameter at ±0.35 rad; 1.0 is nominal.
+    # false = JAX on the Jetson GPU. true only for debugging (much slower).
+    use_cpu: false
+    # RViz/Foxglove debug topics. Off saves a little CPU; they never slow control.
+    publish_selected_paths: true   # chosen plan, /mppi/selected_paths
+    publish_occupancy_grid: true   # local obstacle grid, /mppi/occupancy_grid
+    publish_top_paths: false       # 50 best samples + costs, /mppi/top_paths
+    path_frame: map
+
+    # ------------------------------------------------------------ planning horizon
+    # Rollout step [s]. ALSO the control period: 0.05 = 20 Hz commands.
+    #   tune: lower only if the logged latency stays well below DT.
+    #   effect: smaller = quicker reactions but more compute and shorter look-ahead.
+    dt: 0.05
+    # Steps per rollout; look-ahead = horizon * dt (40 * 0.05 = 2 s).
+    #   tune: look-ahead should cover braking for the next corner at max_speed.
+    #   effect: longer = earlier braking / smoother corner entry, more compute;
+    #           too short = late reactions and corner cutting.
+    horizon: 40
+    # Sampled control sequences per step.
+    #   tune: halve if "latency > DT" appears in the node's stats log.
+    #   effect: more = better, steadier plans; fewer = noisier steering.
+    num_samples: 1024
+
+    # ------------------------------------------------------------ cost weights
+    # Penalties on the error to the reference route at each step:
+    #   [lag (along route), lateral (across route), yaw, speed]
+    #   tune: lateral is the main knob. Raise it if the car drifts off the line,
+    #         lower it if steering oscillates around the line. Raise speed to follow
+    #         the route speed more tightly; yaw damps heading wobble on straights.
+    #   effect: higher weight = that error is corrected harder, at the expense of
+    #           the others and of smoothness.
+    q: [1.0, 20.0, 2.0, 1.0]
+    # Same terms for the last step only (end of horizon), usually ~2x q.
+    #   effect: higher = plans that end on the line, earlier corner set-up.
+    qf: [2.0, 40.0, 4.0, 1.0]
+    # Penalty on input size: [acceleration, steering].
+    #   effect: higher steering weight = gentler steering, wider corners.
+    r: [0.01, 1.0]
+    # Penalty on input change between steps: [acceleration, steering].
+    #   tune: raise steering if the wheels jitter; lower if the car is slow to turn in.
+    #   effect: higher = smoother commands, but slower response.
+    rd: [0.01, 1.0]
+
+    # ------------------------------------------------------------ sampling
+    # Temperature: how strongly the best samples dominate the average.
+    #   tune: 0.05-0.3 is a reasonable range.
+    #   effect: lower = follows the single best sample (sharper, more jittery);
+    #           higher = averages many samples (smoother, more sluggish).
+    lambda: 0.1
+    # Noise std of the sampled inputs [acceleration m/s^2, steering rad]. With
+    # cov_update it is the upper bound of the adaptive std.
+    #   tune: raise steering std if the car fails to find sharp turns or avoid
+    #         obstacles; lower it if steering is noisy on straights.
+    #   effect: larger = explores more, reacts to surprises, but noisier commands.
+    u_std: [1.5, 0.15]
+    # Adapt the std to the spread of good samples (true recommended).
+    #   effect: settles to small noise on easy sections, opens up when needed.
+    cov_update: true
+    # Lower bound of the adaptive std; keeps the search from collapsing.
+    u_std_min: [0.3, 0.03]
+    # Speed of the std adaptation (0-1). Higher = adapts faster, less stable.
+    cov_alpha: 0.5
+    # Step-to-step correlation of the noise (0-1).
+    #   effect: higher = smoother sampled steering curves, fewer sharp corrections.
+    noise_rho: 0.9
+    # Sampling distribution inside the input limits: uniform, truncated or clip.
+    sampling: uniform
+
+    # ------------------------------------------------------------ actuator limits
+    # Steering command range [rad]. Must not exceed what the servo really reaches,
+    # or the plan assumes turns the car cannot make.
+    min_steer: -0.35
+    max_steer: 0.35
+    # Acceleration range [m/s^2]. Also how fast the reference speed may ramp up.
+    #   tune: lower max_accel if the rear slips on exit; lower |min_accel| if it
+    #         brakes too hard; measure with a speed-step test.
+    #   effect: higher = faster starts and later braking, more wheelspin/sliding.
+    min_accel: -3.0
+    max_accel: 3.0
+
+    # ------------------------------------------------------------ vehicle model (kinematic)
+    # Wheelbase [m].
+    wb: 0.33
+    # Scales the modeled yaw rate v*tan(steer)/wb. 1.0 = ideal geometry; 1.09245
+    # matches a measured 67-inch turning diameter at +-0.35 rad.
+    #   tune: if the car turns tighter than the plan (cuts inside), raise it; if it
+    #         turns wider (runs outside), lower it. Re-measure after servo changes.
     steering_curvature_gain: 1.09245
+    # Steering dead time [s] between command and wheel motion, compensated in the
+    # rollouts (kinematic mode, tracker none). Rounded to whole dt steps.
+    #   tune: match the measured servo latency.
+    #   effect: too low = late turn-in and weaving; too high = early turn-in.
+    steering_delay_s: 0.15
+    # Rollout integrator: rk4 (accurate) or euler (cheaper).
+    integrator: rk4
+
+    # ------------------------------------------------------------ dynamic model
+    # Only used with dynamics: dynamic (tire model with slip). The values are
+    # starting estimates, not identified car parameters. Kinematic mode is the
+    # tested real-car setup.
+    dynamics: kinematic
+    mass: 3.5                    # [kg]
+    yaw_inertia: 0.05            # [kg m^2]
+    front_length: 0.16           # COM to front axle [m]
+    tire_mu: 0.8                 # friction coefficient; lower = earlier slide in the model
+    front_stiffness: 20.0        # cornering stiffness [N/rad]; front > rear = more oversteer
+    rear_stiffness: 20.0
+    front_drive_fraction: 0.5    # share of drive/brake force on the front axle
+    speed_response_time: 0.25    # [s] how fast the motor tracks a speed setpoint
+    max_steer_rate: 3.14         # [rad/s] steering slew limit for feasibility checks
+    dynamic_substeps: 10         # integration substeps per dt; raise if rollouts go NaN
+    blend_low_speed: 0.5         # [m/s] below this, kinematic behavior
+    blend_high_speed: 1.5        # [m/s] above this, full tire model
+    lateral_response_time: 0.1   # [s] low-speed lateral/yaw relaxation
+    max_sideslip: 0.6            # [rad] slip angle allowed before a plan is rejected
+    max_yaw_rate: 5.0            # [rad/s] yaw rate allowed before a plan is rejected
+    envelope_weight: 100.0       # slip/yaw-rate envelope penalty (currently logged only)
+
+    # ------------------------------------------------------------ acados tracker
+    # none = MPPI drives directly. acados = MPPI plans, an MPC tracks the plan
+    # (kinematic only; needs a build with -DMPPI_BUILD_ACADOS=ON, and no
+    # steering_delay_s / steering_curvature_gain).
+    tracker: none
+    tracker_prebuilt_dir: ''
+    tracker_max_steer_rate: 3.141592653589793
