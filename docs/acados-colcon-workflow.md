@@ -62,13 +62,18 @@ Makefile. acados remains an external dependency; colcon does not download it.
 For the checked-in 40-step, 6 m/s formulation:
 
 ```bash
-ros2 launch hybrid_mppi car_launch.py \
-  odom_topic:=/ego_racecar/odom \
-  tracker:=acados use_cpu:=true horizon:=40 max_speed:=6.0
+ros2 run hybrid_mppi mppi_node.py --ros-args \
+  -p odom_topic:=/ego_racecar/odom \
+  -p tracker:=acados -p use_cpu:=true -p horizon:=40 -p max_speed:=6.0
 ```
 
+On the car, set `tracker: acados`, `horizon` and `max_speed` in
+`config/car_config.yaml` (with `steering_delay_s: 0.0` and
+`steering_curvature_gain: 1.0`, which the tracker does not support) and run
+`ros2 launch hybrid_mppi car_launch.py`.
+
 For a 1 m/s test, first generate with `--max-speed 1.0`, commit and rebuild, then
-launch with `max_speed:=1.0`. Runtime horizon, limits, and dynamics must match the
+run with `max_speed:=1.0`. Runtime horizon, limits, and dynamics must match the
 compiled formulation; the loader rejects incompatible settings.
 
 Select waypoints matching the simulator map (`track:=levine` by default).

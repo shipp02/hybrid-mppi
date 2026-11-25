@@ -36,16 +36,11 @@ control period; CPU execution is not established to meet this deadline. Match
 the controller must share a clock. Wait for compilation and `MPPI ready` before
 judging steady-state behavior.
 
-The existing configurable launch also accepts dynamic mode:
-
-```bash
-ros2 launch hybrid_mppi car_launch.py \
-  odom_topic:=/ego_racecar/odom track:=levine \
-  dynamics:=dynamic tracker:=none use_cpu:=true horizon:=20 max_speed:=2.0
-```
-
-Despite its name, this launch can target simulator odometry. Graded Levine and
-Spielberg launches remain unchanged and use kinematic mode.
+On the car, set `dynamics: dynamic` (and `steering_delay_s: 0.0`,
+`steering_curvature_gain: 1.0`, which are kinematic-only) in
+`config/car_config.yaml`, or in a copy passed with `config_file:=`, then run
+`ros2 launch hybrid_mppi car_launch.py`. Graded Levine and Spielberg launches
+remain unchanged and use kinematic mode.
 
 ## State, frames and command semantics
 
