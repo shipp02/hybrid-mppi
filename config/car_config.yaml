@@ -46,11 +46,14 @@ mppi_node:
     #   tune: lower only if the logged latency stays well below DT.
     #   effect: smaller = quicker reactions but more compute and shorter look-ahead.
     dt: 0.05
-    # Steps per rollout; look-ahead = horizon * dt (40 * 0.05 = 2 s).
+    # Steps per rollout; look-ahead = horizon * dt (60 * 0.05 = 3 s).
+    # Also how early obstacles are avoided: 3 s started the swerve 3.3-4.3 m before
+    # a box at 2 m/s (2 s: 1.6-2.4 m), for ~1.5x the compute of 40 steps. The
+    # obstacle grid reaches 6 m ahead, so look-ahead beyond 6 m sees no obstacles.
     #   tune: look-ahead should cover braking for the next corner at max_speed.
     #   effect: longer = earlier braking / smoother corner entry, more compute;
     #           too short = late reactions and corner cutting.
-    horizon: 40
+    horizon: 60
     # Sampled control sequences per step.
     #   tune: halve if "latency > DT" appears in the node's stats log.
     #   effect: more = better, steadier plans; fewer = noisier steering.
@@ -68,13 +71,14 @@ mppi_node:
     # - a low speed weight makes stopping in front of a box cheaper than leaving
     #   the line: 1 always stopped, 5 still stopped in 2/6 runs at 1 m/s, 10 passed
     #   6/6 at both 1 and 2 m/s. Keep it high if you lower the route speed.
-    # - lateral 20 made leaving the line so expensive that the car waited until
-    #   ~1.2 m before a box to swerve; 5 starts ~2 m before with a wider gap, and
-    #   tracked a 4 m radius curve more closely (1.1 vs 1.7 cm rms).
-    q: [1.0, 5.0, 2.0, 10.0]
+    # - lateral is also how hard the car returns to the line: 20 swerved only
+    #   ~1.2 m before a box, 5 ~2 m before and was back on the line 1.6-1.9 m past
+    #   it; 2 (with horizon 60) returns 2.4-2.7 m past it with a wider gap, at
+    #   3.3 cm rms on a 4 m radius curve (1.7 cm with 5).
+    q: [1.0, 2.0, 2.0, 10.0]
     # Same terms for the last step only (end of horizon), usually ~2x q.
     #   effect: higher = plans that end on the line, earlier corner set-up.
-    qf: [2.0, 10.0, 4.0, 10.0]
+    qf: [2.0, 4.0, 4.0, 10.0]
     # Penalty on input size: [acceleration, steering].
     #   effect: higher steering weight = gentler steering, wider corners.
     r: [0.01, 1.0]
@@ -90,27 +94,12 @@ mppi_node:
     #   tune: raise for more margin (narrow gaps become impassable); lower and the
     #         body can touch, since localization error eats into the gap.
     obstacle_inflation: 0.22
-    # Points along the body that must keep that distance [m ahead of the pose; the
-    # pose is the LiDAR, ~0.13 m behind the front bumper and ~0.37 m ahead of the
-    # rear one]. Checking the LiDAR point alone let the car steer back to the line
-    # while its rear half was still beside the obstacle.
-    #   tune: cover the rear: last point + obstacle_inflation >= 0.37. More points
-    #         = more compute (one grid lookup each per rollout step).
-    #   effect: the car stays out until the rear has cleared; more negative = later.
-    body_offsets: [-0.2, -0.1, 0.0]
-    # A plan that still collides (no way past found yet) brakes to stop this far
-    # before the contact point [m]. The car then slows while it looks for a way
-    # past instead of arriving at full speed.
+    # When the plan runs into an obstacle ahead (its path comes closer than half
+    # the car width), brake to stop this far before it [m], while still looking
+    # for a way past. The inflated margin alone never brakes, so the car keeps
+    # its speed along close walls and once a way past is found.
     #   tune: raise if it still arrives too fast; lower if it brakes too early.
     stop_margin: 0.3
-    # Speed cap while passing close to an obstacle [m/s]: full speed beyond
-    # obstacle_inflation + 0.25 m, falling to this value at obstacle_inflation.
-    # near_obstacle_weight is how hard the cap is held (0 turns it off).
-    #   tune: lower the speed for more time to correct a tight pass; raise the
-    #         weight if the car still passes close at full speed.
-    #   effect: slower, more controlled passes; lap time lost near walls too.
-    near_obstacle_speed: 0.8
-    near_obstacle_weight: 20.0
 
     # ------------------------------------------------------------ sampling
     # Temperature: how strongly the best samples dominate the average.
