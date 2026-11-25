@@ -65,6 +65,8 @@ class MPPIConfig:
         """Reject unusable settings before tracing any rollout."""
         if self.DYNAMICS not in ('kinematic', 'dynamic'):
             raise ValueError('dynamics must be kinematic or dynamic')
+        if self.H < 1 or self.T < 1:
+            raise ValueError('horizon and num_samples must be positive')
         if not math.isfinite(self.STEERING_CURVATURE_GAIN) or self.STEERING_CURVATURE_GAIN <= 0:
             raise ValueError('steering_curvature_gain must be finite and positive')
         if self.STEERING_CURVATURE_GAIN != 1.0 and self.DYNAMICS != 'kinematic':

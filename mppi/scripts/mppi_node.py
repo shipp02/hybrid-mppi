@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-from dataclasses import replace
+from dataclasses import fields, replace
 from controller_config import MPPIConfig
 from functools import partial
 from typing import NamedTuple
@@ -11,6 +11,7 @@ import numpy as np
 import rclpy
 from ackermann_msgs.msg import AckermannDriveStamped
 from rclpy.node import Node
+from rcl_interfaces.msg import ParameterDescriptor
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
 from geometry_msgs.msg import Point
 from visualization_msgs.msg import Marker
@@ -482,6 +483,34 @@ def calc_waypoint_yaw(x, y):
     yaw = np.arctan2(delta[:, 1], delta[:, 0])
     return np.append(yaw, yaw[0]) if repeated_endpoint else yaw
 
+def tunable_config_fields():
+    """MPPIConfig fields settable from ROS; NX follows DYNAMICS and NU is fixed."""
+    return [field for field in fields(MPPIConfig) if field.name not in ('NX', 'NU')]
+
+
+def config_parameter_name(field_name):
+    """ROS parameter name: the lower-case field name, except for single letters."""
+    return {'H': 'horizon', 'T': 'num_samples'}.get(field_name, field_name.lower())
+
+
+def ros_parameter_default(default):
+    """ROS has no tuple type, so vector settings are declared as double arrays."""
+    return [float(v) for v in default] if isinstance(default, tuple) else default
+
+
+def config_value(name, default, value):
+    """Cast a ROS parameter value to the type of its MPPIConfig default."""
+    if isinstance(default, tuple):
+        if len(value) != len(default):
+            raise ValueError(f'{name} needs {len(default)} values, got {len(value)}')
+        return tuple(float(v) for v in value)
+    if isinstance(default, bool):  # checked before int: bool is an int subclass
+        if not isinstance(value, bool):
+            raise ValueError(f'{name} must be true or false, got {value!r}')
+        return value
+    return type(default)(value)
+
+
 class SentSteeringHistory:
     """Retain the delay window and the command already active at its start."""
 
@@ -526,23 +555,7 @@ class MPPI(Node):
         self.declare_parameter('track', 'levine')
         self.declare_parameter('odom_topic', '')
         track = self.get_parameter('track').value
-        
-        overrides = {}
-        for field in ('MAX_SPEED', 'STEERING_DELAY_S', 'STEERING_CURVATURE_GAIN',
-                      'LAMBDA', 'INTEGRATOR', 'SAMPLING', 'COV_UPDATE',
-                      'DYNAMICS', 'MASS', 'YAW_INERTIA', 'WB', 'FRONT_LENGTH', 'TIRE_MU',
-                      'FRONT_STIFFNESS', 'REAR_STIFFNESS', 'FRONT_DRIVE_FRACTION',
-                      'SPEED_RESPONSE_TIME', 'MAX_STEER_RATE', 'DYNAMIC_SUBSTEPS',
-                      'BLEND_LOW_SPEED', 'BLEND_HIGH_SPEED', 'LATERAL_RESPONSE_TIME',
-                      'MAX_SIDESLIP', 'MAX_YAW_RATE', 'ENVELOPE_WEIGHT'):
-            default = getattr(MPPIConfig, field)
-            self.declare_parameter(field.lower(), default)
-            overrides[field] = type(default)(self.get_parameter(field.lower()).value)
-        self.declare_parameter('horizon', MPPIConfig.H)
-        overrides['H'] = int(self.get_parameter('horizon').value)
-        if overrides['H'] < 1:
-            raise ValueError('horizon must be positive')
-        self.config = replace(MPPIConfig(), **overrides)
+        self.config = self._declare_controller_config()
         self.declare_parameter('tracker', 'none')
         self.declare_parameter('tracker_prebuilt_dir', '')
         self.declare_parameter('tracker_max_steer_rate', float(np.pi))
@@ -701,6 +714,16 @@ class MPPI(Node):
             max_steer_rate=self.get_parameter('tracker_max_steer_rate').value,
             export_directory=prebuilt_directory,
             generate=False)
+
+    def _declare_controller_config(self):
+        """Expose every tunable MPPIConfig field as a ROS parameter (see car_config.yaml)."""
+        any_type = ParameterDescriptor(dynamic_typing=True)
+        values = {}
+        for field in tunable_config_fields():
+            name = config_parameter_name(field.name)
+            self.declare_parameter(name, ros_parameter_default(field.default), any_type)
+            values[field.name] = config_value(name, field.default, self.get_parameter(name).value)
+        return replace(MPPIConfig(), **values)
 
     def _configure_device(self):
         """Select backend before allocating state; GPU requests never fall back."""
