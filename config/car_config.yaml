@@ -70,14 +70,24 @@ mppi_node:
     # - a low speed weight makes stopping in front of a box cheaper than leaving
     #   the line: 1 always stopped, 5 still stopped in 2/6 runs at 1 m/s, 10 passed
     #   6/6 at both 1 and 2 m/s. Keep it high if you lower the route speed.
-    # - lateral is also how hard the car returns to the line: 20 swerved only
-    #   ~1.2 m before a box, 5 ~2 m before and was back on the line 1.6-1.9 m past
-    #   it; lower returns later with a wider gap but cuts corners more (2 with
-    #   horizon 60 hit walls on the car). 3 tracked a 4 m radius curve as well as 5.
-    q: [1.0, 3.0, 2.0, 10.0]
-    # Same terms for the last step only (end of horizon), usually ~2x q.
-    #   effect: higher = plans that end on the line, earlier corner set-up.
-    qf: [2.0, 6.0, 4.0, 10.0]
+    # - lateral also holds the car in corners: 3 cut 0.36 m inside a 1.6 m radius
+    #   corner in simulation (the car hit the inner walls of left corners), 10
+    #   0.15-0.17 m. Too high and the car swerves late around obstacles and
+    #   returns to the line right after them; tracking_decay softens that.
+    q: [1.0, 10.0, 2.0, 10.0]
+    # Same terms for the last step only (end of horizon).
+    #   effect: higher = plans that end on the line. The last reference point is
+    #   the farthest, around the next corner: weighting it more pulls the plan
+    #   across the inside of the corner, so it is not raised above q.
+    qf: [1.0, 10.0, 2.0, 10.0]
+    # Weight of the last step relative to the first, linear in between: near
+    # reference points pull hardest, far ones (around the corner, behind an
+    # obstacle) less. 1 = all steps equal.
+    #   tune: lower = gentler return to the line after obstacles; below ~0.4 the
+    #         gap to obstacles and corner holding got worse in simulation.
+    #   effect: with lateral 10, 0.5 cut a corner 0.17 m (1: 0.15 m) and returned
+    #           to the line 1.7-2.0 m past a box (1: 1.5-1.7 m).
+    tracking_decay: 0.5
     # Penalty on input size: [acceleration, steering].
     #   effect: higher steering weight = gentler steering, wider corners.
     r: [0.01, 1.0]
@@ -154,19 +164,18 @@ mppi_node:
     # ------------------------------------------------------------ vehicle model (kinematic)
     # Wheelbase [m].
     wb: 0.33
-    # Scales the modeled yaw rate v*tan(steer)/wb. 1.0 = ideal geometry. 1.17 is
-    # fitted to the PF yaw rate in four runs (2026-11-25; 1.09245 came from a
-    # measured 67-inch turning diameter at +-0.35 rad).
+    # Scales the modeled yaw rate v*tan(steer)/wb. 1.0 = ideal geometry; 1.09245
+    # matches a measured 67-inch turning diameter at +-0.35 rad. (Fits to the PF
+    # yaw rate gave 1.17-1.44 but were inconsistent between runs.)
     #   tune: if the car turns tighter than the plan (cuts inside), raise it; if it
     #         turns wider (runs outside), lower it. Re-measure after servo changes.
-    steering_curvature_gain: 1.17
-    # The wheels point this much left of the command [rad] (servo centre not
-    # trimmed). +0.018 fitted with the gain above: left turns were ~35% tighter
-    # than the model and right ones ~8%, so plans cut the inner wall of left
-    # corners. Better fixed at the servo (vesc steering_angle_to_servo_offset),
-    # then set this back to 0.
-    #   tune: car drifts left on straights / cuts left corners -> raise; right -> lower.
-    steering_offset: 0.018
+    steering_curvature_gain: 1.09245
+    # The wheels point this much left of the command [rad], if the servo centre
+    # is not trimmed (better fixed at the servo: vesc steering_angle_to_servo_offset).
+    # A fit suggested +0.018, but the corner hits came from corner cutting (low
+    # lateral weight), so it is 0 until measured on its own.
+    #   tune: car drifts left on straights -> raise; right -> lower.
+    steering_offset: 0.0
     # Steering dead time [s] between command and wheel motion, compensated in the
     # rollouts (kinematic mode, tracker none). Rounded to whole dt steps.
     #   tune: match the measured servo latency.
