@@ -1,6 +1,6 @@
 mppi_node:
   ros__parameters:
-    track: levine_waypoints.csv
+    track: levine_real_smooth.csv
     max_speed: 3.0
     # map-frame localization (particle filter); not /odom, which is wheel odometry
     odom_topic: /pf/pose/odom
