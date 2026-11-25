@@ -193,9 +193,17 @@ def cost_components(X, U, ref, cfg, grid):
     # Grows with how deep the body is inside the inflated zone: once the car is
     # inside it, every sample collides on its first steps, and a flat penalty left
     # no preference for the samples that leave the zone.
-    depth = jnp.maximum(grid.spec.inflation_radius - grid.clearance(local_traj), 0.0)
+    clearance = grid.clearance(local_traj)
+    depth = jnp.maximum(grid.spec.inflation_radius - clearance, 0.0)
     # Keep timestep costs separate: mppi_update owns horizon/cost-to-go sums.
     obs_block_cost = 10 * jnp.where(~obs_blocked, blocked_penalty * (1.0 + 20.0 * depth), 0.0)
+    # Soft push away from obstacles and walls closer than distance_cap: 0 beyond it,
+    # CLEARANCE_WEIGHT at the inflated edge. Between an obstacle and a wall the
+    # pushes from both sides balance in the middle of the gap.
+    spec = grid.spec
+    nearness = jnp.clip((spec.distance_cap - clearance)
+                        / (spec.distance_cap - spec.inflation_radius), 0.0, 1.0)
+    clearance_cost = cfg.CLEARANCE_WEIGHT * nearness ** 2
     # obs_block_cost = 0.0
 
     # position error in the frame of the reference: [lag, lateral]. From rest the
@@ -232,11 +240,13 @@ def cost_components(X, U, ref, cfg, grid):
         envelope_cost = cfg.ENVELOPE_WEIGHT * jnp.sum(db.envelope_excess(X[1:], cfg) ** 2, axis=1)
     return dict(tracking=state_cost, control=input_cost,
                 control_change=input_difference_cost, obstacle=obs_block_cost,
+                clearance=clearance_cost,
                 envelope=jnp.broadcast_to(envelope_cost, state_cost.shape))
 
 
 def total_cost(parts):
-    return (parts['tracking'] + parts['control'] + parts['control_change'] + parts['obstacle'])
+    return (parts['tracking'] + parts['control'] + parts['control_change'] + parts['obstacle']
+            + parts['clearance'])
 
 
 class TopPaths(NamedTuple):
@@ -334,12 +344,14 @@ def plan_collides(U, x0, cfg, grid, steering_prefix=None):
 
 
 def brake_before_collision(U, x0, cfg, grid, steering_prefix=None):
-    """Brake when the plan runs into an obstacle ahead: stop STOP_MARGIN before it.
+    """Limit the speed when the plan runs into an obstacle ahead.
 
     Contact means the plan's path comes closer than half the car width (0.16 m) to
-    an obstacle; the inflated margin alone never brakes. Steps already in contact
+    an obstacle; the inflated margin alone never limits. Steps already in contact
     at the start of the plan are skipped, so driving along a close wall keeps its
-    speed. The constant deceleration v^2 / 2d only lowers the planned acceleration.
+    speed. The limit is the speed that can still stop STOP_MARGIN before contact,
+    but never below a 0.3 m/s crawl: a limit of zero left the car stopped for good
+    even while it was steering away.
     """
     nominal = simulate(x0, U, cfg, steering_prefix)
     local = trajectory_to_car_frame(nominal[1:], x0[0], x0[1], x0[2])
@@ -347,9 +359,9 @@ def brake_before_collision(U, x0, cfg, grid, steering_prefix=None):
     ahead = touching & (jnp.cumsum(~touching) > 0)     # after the first step out of contact
     xy = jnp.concatenate((jnp.zeros((1, 2)), local[:, :2]), axis=0)
     path_dist = jnp.cumsum(jnp.linalg.norm(jnp.diff(xy, axis=0), axis=1))
-    contact = path_dist[jnp.argmax(ahead)]
-    room = jnp.maximum(contact - cfg.STOP_MARGIN, 0.05)
-    accel = jnp.clip(-x0[3] ** 2 / (2.0 * room), cfg.MIN_ACCEL, 0.0)
+    room = jnp.maximum(path_dist[jnp.argmax(ahead)] - cfg.STOP_MARGIN, 0.0)
+    speed_limit = jnp.maximum(jnp.sqrt(2.0 * -cfg.MIN_ACCEL * room), 0.3)
+    accel = jnp.clip((speed_limit - x0[3]) / cfg.DT, cfg.MIN_ACCEL, cfg.MAX_ACCEL)
     braked = U.at[:, 0].set(jnp.minimum(U[:, 0], accel))
     return jnp.where(jnp.any(ahead), braked, U)
 
@@ -731,6 +743,7 @@ class MPPI(Node):
 
         # Geometry is initialized after the fixed LiDAR pose becomes available.
         self.declare_parameter('obstacle_inflation', 0.22)
+        self.declare_parameter('clearance_range', 0.25)
         self.declare_parameter('lidar_forward_offset', 0.0)
         inflation = float(self.get_parameter('obstacle_inflation').value)
         self._grid_settings = dict(
@@ -740,7 +753,8 @@ class MPPI(Node):
             resolution=0.05,
             inflation_radius=inflation,
             num_beams=811,
-            distance_cap=inflation + 0.25,  # clearance is tracked a little past the inflation
+            # clearance is tracked this far past the inflation (clearance_weight range)
+            distance_cap=inflation + float(self.get_parameter('clearance_range').value),
         )
         self.grid = None
         self._grid_frames = None

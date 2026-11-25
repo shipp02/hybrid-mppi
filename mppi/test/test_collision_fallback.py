@@ -69,8 +69,12 @@ class PassOnOneSideTest(unittest.TestCase):
 
     def test_colliding_plan_brakes_before_contact(self):
         U = c.brake_before_collision(self.straight, self.x0, self.cfg, self.grid)
-        # 3 m/s, contact ~1.8 m ahead (inflated object at 2 m): v^2 / 2(d - margin) ~ 3 m/s^2
-        self.assertTrue(bool(jnp.all(U[:, 0] < -2.0)))
+        # 3 m/s, object 2 m ahead: limited to sqrt(2 * 3 * (~1.85 - 0.3)) ~ 3.0 m/s or less
+        self.assertTrue(bool(jnp.all(U[:, 0] <= 0.0)))
+        stopped = c.brake_before_collision(self.straight.at[:, 0].set(3.0),
+                                           self.x0.at[3].set(0.0), self.cfg, self.grid)
+        # from rest the car may still crawl forward
+        self.assertTrue(bool(jnp.all(stopped[:, 0] > 0.0)))
         np.testing.assert_allclose(U[:, 1], self.straight[:, 1])
 
     def test_clear_plan_is_not_braked(self):
