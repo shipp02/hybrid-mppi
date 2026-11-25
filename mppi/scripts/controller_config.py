@@ -25,6 +25,7 @@ class MPPIConfig:
     # cost() weights the position error along the reference (lag) and across it (lateral)
     Q: tuple = (1.0, 20.0, 2.0, 1.0)  # state error cost [lag, lateral, yaw, v]
     Qf: tuple = (2.0, 40.0, 4.0, 1.0)
+    TRACKING_DECAY: float = 1.0  # tracking weight of the last step relative to the first (linear)
     R: tuple = (0.01, 1.0)  # input cost [a, delta]
     Rd: tuple = (0.01, 1.0)  # input difference cost [a, delta]
     # ---------------------------------------------------
@@ -77,6 +78,8 @@ class MPPIConfig:
             raise ValueError('max_speed_lead must be finite and positive')
         if not math.isfinite(self.CLEARANCE_WEIGHT) or self.CLEARANCE_WEIGHT < 0:
             raise ValueError('clearance_weight must be finite and nonnegative')
+        if not math.isfinite(self.TRACKING_DECAY) or not 0 <= self.TRACKING_DECAY <= 1:
+            raise ValueError('tracking_decay must lie in [0, 1]')
         if not math.isfinite(self.STOP_MARGIN) or self.STOP_MARGIN < 0:
             raise ValueError('stop_margin must be finite and nonnegative')
         if not math.isfinite(self.STEERING_CURVATURE_GAIN) or self.STEERING_CURVATURE_GAIN <= 0:

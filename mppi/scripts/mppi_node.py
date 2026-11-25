@@ -225,6 +225,9 @@ def cost_components(X, U, ref, cfg, grid):
     final_state_cost = jnp.sum(Qf * error[-1] ** 2)
 
     state_cost = state_cost.at[-1].set(final_state_cost)
+    # Far reference points lie around the next corner; weighting them less keeps
+    # them from pulling the plan across the inside of the corner.
+    state_cost = state_cost * jnp.linspace(1.0, cfg.TRACKING_DECAY, state_cost.shape[0])
 
     input_cost = jnp.sum(R * U ** 2, axis=1)
 
