@@ -307,29 +307,55 @@ def select_feasible_controls(U, samples, trajectories, costs, x0, cfg):
     return jnp.where(mean_ok, U, alternative)
 
 
-def select_collision_free_controls(U, samples, costs, obstacle_costs, x0, cfg, grid,
-                                   steering_prefix=None):
-    """Replace a colliding weighted mean by the cheapest collision-free sample.
+def mppi_weights(S, cfg, mask=None):
+    """Per-step softmax of cost-to-go, normalized to [0, 1] over the (masked) samples."""
+    if mask is None:
+        mask = jnp.ones(S.shape[0], dtype=bool)
+    S_min = jnp.min(jnp.where(mask[:, None], S, jnp.inf), axis=0, keepdims=True)
+    S_max = jnp.max(jnp.where(mask[:, None], S, -jnp.inf), axis=0, keepdims=True)
+    scaled = -(S - S_min) / (S_max - S_min + 1e-6) / cfg.LAMBDA
+    return jax.nn.softmax(jnp.where(mask[:, None], scaled, -jnp.inf), axis=0)
 
-    With an obstacle on the route, passing left and passing right are equally good
-    and their weighted average drives straight into it. Committing to the best clear
-    sample picks a side; the next warm start keeps it.
-    """
+
+def plan_collides(U, x0, cfg, grid, steering_prefix=None):
+    """Whether the rollout of U enters an inflated obstacle cell."""
     nominal = simulate(x0, U, cfg, steering_prefix)
-    local = trajectory_to_car_frame(nominal[1:], x0[0], x0[1], x0[2])
-    mean_collides = jnp.any(~grid.is_free(local))
-    sample_collides = jnp.any(obstacle_costs > 0, axis=1)
-    score = jnp.where(sample_collides, jnp.inf, jnp.sum(costs, axis=1))
-    best = samples[jnp.argmin(score)]
-    return jnp.where(mean_collides & jnp.any(~sample_collides), best, U)
+    return jnp.any(~grid.is_free(trajectory_to_car_frame(nominal[1:], x0[0], x0[1], x0[2])))
+
+
+def reference_side(X, ref):
+    """+1 or -1: the side of the reference each rollout mostly runs on (left +)."""
+    yaw = ref[None, 1:, 2]
+    lateral = (-jnp.sin(yaw) * (X[:, 1:, 0] - ref[None, 1:, 0])
+               + jnp.cos(yaw) * (X[:, 1:, 1] - ref[None, 1:, 1]))
+    return jnp.sign(jnp.mean(lateral, axis=1))
+
+
+def pass_on_one_side(U, weights, samples, X, S, costs, obstacle_costs, ref, x0, cfg, grid,
+                     steering_prefix=None):
+    """Keep the weighted mean unless it collides; then average one side's clear samples.
+
+    With an obstacle on the route, passing left and passing right are equally good,
+    so their weighted average drives straight into it. The side of the cheapest
+    collision-free sample is chosen and only the collision-free samples on that side
+    are averaged, which keeps the command smooth (a single raw sample carries the
+    sampling noise and made the steering dither). Returns (controls, weights).
+    """
+    clear = ~jnp.any(obstacle_costs > 0, axis=1)
+    side = reference_side(X, ref)
+    best = jnp.argmin(jnp.where(clear, jnp.sum(costs, axis=1), jnp.inf))
+    one_side = clear & (side == side[best])
+    side_weights = mppi_weights(S, cfg, one_side)
+    side_mean = jnp.sum(side_weights[:, :, None] * samples, axis=0)
+    side_mean = jnp.where(plan_collides(side_mean, x0, cfg, grid, steering_prefix),
+                          samples[best], side_mean)
+    use_side = plan_collides(U, x0, cfg, grid, steering_prefix) & jnp.any(clear)
+    return jnp.where(use_side, side_mean, U), jnp.where(use_side, side_weights, weights)
 
 
 def sample_rollout_controls(key, U, U_std, x0, cfg):
     """Sample bounded commands and preserve the current nominal as a candidate."""
-    samples = sample_controls(key, U, U_std, cfg)
-    if cfg.DYNAMICS == 'dynamic':
-        samples = samples.at[0].set(U)
-    return samples
+    return sample_controls(key, U, U_std, cfg).at[0].set(U)
 
 
 def mppi_update(key, U, U_std, x0, ref, cfg, grid, *, steering_prefix=None,
@@ -347,18 +373,16 @@ def mppi_update(key, U, U_std, x0, ref, cfg, grid, *, steering_prefix=None,
     S = jnp.flip(jnp.cumsum(jnp.flip(C, axis=1), axis=1), axis=1)
 
     # 4. Weight: normalize S[:, t] to [0, 1] over the samples, then softmax
-    S_min = jnp.min(S, axis=0, keepdims=True)
-    S_max = jnp.max(S, axis=0, keepdims=True)
-    S_normalized = (S - S_min) / (S_max - S_min + 1e-6)
-    weights = jax.nn.softmax(-S_normalized / cfg.LAMBDA, axis=0)
+    weights = mppi_weights(S, cfg)
 
     # 5. Update: U_new[t] = sum_k w[k, t] * u_k[t]
     U_new = jnp.sum(weights[:, :, jnp.newaxis] * U_samples, axis=0)
     if cfg.DYNAMICS == 'dynamic':
         U_new = select_feasible_controls(U_new, U_samples, X_samples, C, x0, cfg)
     else:
-        U_new = select_collision_free_controls(
-            U_new, U_samples, C, parts['obstacle'], x0, cfg, grid, steering_prefix)
+        U_new, weights = pass_on_one_side(
+            U_new, weights, U_samples, X_samples, S, C, parts['obstacle'], ref, x0, cfg,
+            grid, steering_prefix)
 
     # Bonus: covariance update, Sigma_t = sum_k w[k, t] (u_k[t] - U_t)(u_k[t] - U_t)^T.
     # The truncated sampler draws each input independently, so it keeps the
