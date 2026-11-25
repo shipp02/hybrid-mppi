@@ -109,8 +109,9 @@ mppi_node:
     #         reaches across wider gaps but costs grid compute and pushed past the
     #         middle in tools/avoidance_sim.py (0.45 vs 0.25).
     #   effect: in a 0.8 m gap, weight 5 passed 25-27 cm from the box (0: 21-25)
-    #           at the middle of the gap.
-    clearance_weight: 5.0
+    #           at the middle of the gap. 10 on the car after the body scraped the
+    #           inner wall of corners with the LiDAR point right at the inflation.
+    clearance_weight: 10.0
     clearance_range: 0.25
 
     # ------------------------------------------------------------ sampling
@@ -153,11 +154,19 @@ mppi_node:
     # ------------------------------------------------------------ vehicle model (kinematic)
     # Wheelbase [m].
     wb: 0.33
-    # Scales the modeled yaw rate v*tan(steer)/wb. 1.0 = ideal geometry; 1.09245
-    # matches a measured 67-inch turning diameter at +-0.35 rad.
+    # Scales the modeled yaw rate v*tan(steer)/wb. 1.0 = ideal geometry. 1.17 is
+    # fitted to the PF yaw rate in four runs (2026-11-25; 1.09245 came from a
+    # measured 67-inch turning diameter at +-0.35 rad).
     #   tune: if the car turns tighter than the plan (cuts inside), raise it; if it
     #         turns wider (runs outside), lower it. Re-measure after servo changes.
-    steering_curvature_gain: 1.09245
+    steering_curvature_gain: 1.17
+    # The wheels point this much left of the command [rad] (servo centre not
+    # trimmed). +0.018 fitted with the gain above: left turns were ~35% tighter
+    # than the model and right ones ~8%, so plans cut the inner wall of left
+    # corners. Better fixed at the servo (vesc steering_angle_to_servo_offset),
+    # then set this back to 0.
+    #   tune: car drifts left on straights / cuts left corners -> raise; right -> lower.
+    steering_offset: 0.018
     # Steering dead time [s] between command and wheel motion, compensated in the
     # rollouts (kinematic mode, tracker none). Rounded to whole dt steps.
     #   tune: match the measured servo latency.
