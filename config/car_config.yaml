@@ -90,6 +90,27 @@ mppi_node:
     #   tune: raise for more margin (narrow gaps become impassable); lower and the
     #         body can touch, since localization error eats into the gap.
     obstacle_inflation: 0.22
+    # Points along the body that must keep that distance [m ahead of the pose; the
+    # pose is the LiDAR, ~0.13 m behind the front bumper and ~0.37 m ahead of the
+    # rear one]. Checking the LiDAR point alone let the car steer back to the line
+    # while its rear half was still beside the obstacle.
+    #   tune: cover the rear: last point + obstacle_inflation >= 0.37. More points
+    #         = more compute (one grid lookup each per rollout step).
+    #   effect: the car stays out until the rear has cleared; more negative = later.
+    body_offsets: [-0.2, -0.1, 0.0]
+    # A plan that still collides (no way past found yet) brakes to stop this far
+    # before the contact point [m]. The car then slows while it looks for a way
+    # past instead of arriving at full speed.
+    #   tune: raise if it still arrives too fast; lower if it brakes too early.
+    stop_margin: 0.3
+    # Speed cap while passing close to an obstacle [m/s]: full speed beyond
+    # obstacle_inflation + 0.25 m, falling to this value at obstacle_inflation.
+    # near_obstacle_weight is how hard the cap is held (0 turns it off).
+    #   tune: lower the speed for more time to correct a tight pass; raise the
+    #         weight if the car still passes close at full speed.
+    #   effect: slower, more controlled passes; lap time lost near walls too.
+    near_obstacle_speed: 0.8
+    near_obstacle_weight: 20.0
 
     # ------------------------------------------------------------ sampling
     # Temperature: how strongly the best samples dominate the average.
