@@ -64,10 +64,13 @@ mppi_node:
     #         the route speed more tightly; yaw damps heading wobble on straights.
     #   effect: higher weight = that error is corrected harder, at the expense of
     #           the others and of smoothness.
-    q: [1.0, 20.0, 2.0, 1.0]
+    # The speed weight also decides passing vs stopping at an obstacle: with 1 the
+    # car preferred to stop in front of a box (stopping was cheaper than leaving the
+    # line); 5 makes it pass around (closed-loop test: tools/avoidance_sim.py).
+    q: [1.0, 20.0, 2.0, 5.0]
     # Same terms for the last step only (end of horizon), usually ~2x q.
     #   effect: higher = plans that end on the line, earlier corner set-up.
-    qf: [2.0, 40.0, 4.0, 1.0]
+    qf: [2.0, 40.0, 4.0, 5.0]
     # Penalty on input size: [acceleration, steering].
     #   effect: higher steering weight = gentler steering, wider corners.
     r: [0.01, 1.0]
