@@ -730,20 +730,21 @@ class MPPI(Node):
         self.waypoints_publisher.publish(self.waypoints_marker)
 
     def _waypoints_marker(self):
+        """Closed green line, lifted above the map so the map plane does not hide it."""
         marker = Marker()
         marker.header.frame_id = self.get_parameter('path_frame').value
         marker.ns = 'waypoints'
         marker.id = 0
-        marker.type = Marker.POINTS
+        marker.type = Marker.LINE_STRIP
         marker.action = Marker.ADD
         marker.pose.orientation.w = 1.0
-        marker.scale.x = 0.08
-        marker.scale.y = 0.08
+        marker.pose.position.z = 0.05
+        marker.scale.x = 0.06  # line width [m]
         marker.color.g = 1.0
         marker.color.a = 1.0
         # Default zero lifetime keeps the marker visible without refreshing it.
-        marker.points = [Point(x=float(x), y=float(y), z=0.0)
-                         for x, y in self.waypoints[:, :2]]
+        loop = np.vstack((self.waypoints[:, :2], self.waypoints[:1, :2]))
+        marker.points = [Point(x=float(x), y=float(y), z=0.0) for x, y in loop]
         return marker
 
     def _create_tracker(self):
