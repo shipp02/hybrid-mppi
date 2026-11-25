@@ -670,14 +670,17 @@ class MPPI(Node):
         self._stats_window_start = None
 
         # Geometry is initialized after the fixed LiDAR pose becomes available.
+        self.declare_parameter('obstacle_inflation', 0.22)
+        self.declare_parameter('lidar_forward_offset', 0.0)
+        inflation = float(self.get_parameter('obstacle_inflation').value)
         self._grid_settings = dict(
             width=3.0,
             height=7.0,
             middle=(1.5, 1.0),
             resolution=0.05,
-            inflation_radius=0.15,
+            inflation_radius=inflation,
             num_beams=811,
-            distance_cap=0.25,
+            distance_cap=inflation + 0.25,  # clearance is tracked a little past the inflation
         )
         self.grid = None
         self._grid_frames = None
@@ -864,12 +867,13 @@ class MPPI(Node):
         )
 
     def _lookup_lidar_pose(self, scan_frame, scan_stamp):
-        """Return fixed hardware LiDAR pose [forward metres, left metres, yaw].
+        """Return the LiDAR pose relative to the odometry pose [forward m, left m, yaw].
 
-        Assumes COM-based odometry and a centered, forward-facing sensor.
-        LiDAR is 10.5 inches and estimated COM is 6.5 inches from rear axle.
+        The particle filter estimates the pose of the laser frame itself, so the
+        default offset is 0. Set lidar_forward_offset for a pose source at another
+        point (e.g. 0.2667 for a rear-axle pose: the LiDAR is 10.5 in ahead of it).
         """
-        return (0.2667, 0.0, 0.0)  # 4 inches forward of COM
+        return (float(self.get_parameter('lidar_forward_offset').value), 0.0, 0.0)
 
     def _ensure_grid(self, scan_frame, scan_stamp):
         """Cache rigid sensor geometry; resolve it again if either frame changes."""

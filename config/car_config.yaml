@@ -30,6 +30,9 @@ mppi_node:
     # ------------------------------------------------------------ localization & runtime
     # Map-frame pose (particle filter). Not /odom, which is wheel odometry only.
     odom_topic: /pf/pose/odom
+    # Where the LiDAR sits ahead of the odom pose [m]. The particle filter pose IS
+    # the laser frame, so 0. (A wrong offset shifts every obstacle by that much.)
+    lidar_forward_offset: 0.0
     # false = JAX on the Jetson GPU. true only for debugging (much slower).
     use_cpu: false
     # RViz/Foxglove debug topics. Off saves a little CPU; they never slow control.
@@ -72,6 +75,14 @@ mppi_node:
     #   tune: raise steering if the wheels jitter; lower if the car is slow to turn in.
     #   effect: higher = smoother commands, but slower response.
     rd: [0.01, 1.0]
+
+    # ------------------------------------------------------------ obstacles
+    # Minimum distance from the car's centre line to a LiDAR obstacle [m]: the car's
+    # half width (0.155) plus the side gap you want, plus a little for the body
+    # corners while turning. 0.22 left a 4.6-10 cm body gap in tools/avoidance_sim.py.
+    #   tune: raise for more margin (narrow gaps become impassable); lower and the
+    #         body can touch, since localization error eats into the gap.
+    obstacle_inflation: 0.22
 
     # ------------------------------------------------------------ sampling
     # Temperature: how strongly the best samples dominate the average.
