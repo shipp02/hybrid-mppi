@@ -42,6 +42,7 @@ class MPPIConfig:
 
     # Obstacles (kinematic)
     STOP_MARGIN: float = 0.3  # kinematic: brake to stop this far before an obstacle on the plan [m]
+    CLEARANCE_WEIGHT: float = 0.0  # cost of coming near obstacles/walls (inside distance_cap)
 
     # Dynamic bicycle starting estimates, NOT identified real-car parameters.
     MASS: float = 3.5  # kg
@@ -73,6 +74,8 @@ class MPPIConfig:
             raise ValueError('horizon and num_samples must be positive')
         if not math.isfinite(self.MAX_SPEED_LEAD) or self.MAX_SPEED_LEAD <= 0:
             raise ValueError('max_speed_lead must be finite and positive')
+        if not math.isfinite(self.CLEARANCE_WEIGHT) or self.CLEARANCE_WEIGHT < 0:
+            raise ValueError('clearance_weight must be finite and nonnegative')
         if not math.isfinite(self.STOP_MARGIN) or self.STOP_MARGIN < 0:
             raise ValueError('stop_margin must be finite and nonnegative')
         if not math.isfinite(self.STEERING_CURVATURE_GAIN) or self.STEERING_CURVATURE_GAIN <= 0:

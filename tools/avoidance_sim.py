@@ -44,7 +44,7 @@ def load_config(path):
     # of the real steering does not apply; the steering delay is simulated.
     values.update(STEERING_CURVATURE_GAIN=1.0)
     cfg = replace(c.MPPIConfig(), **values)
-    return cfg, float(params.get('obstacle_inflation', 0.22))
+    return cfg, float(params.get('obstacle_inflation', 0.22)), float(params.get('clearance_range', 0.25))
 
 
 def lidar(x, y, yaw, box, wall):
@@ -83,7 +83,7 @@ def steering_reversals(commands, threshold=0.05):
     return int(np.sum(signs[1:] != signs[:-1]))
 
 
-def drive_past_box(cfg, inflation, box, wall, speed, seed, pose_noise=0.0, start_speed=None,
+def drive_past_box(cfg, inflation, clearance_range, box, wall, speed, seed, pose_noise=0.0, start_speed=None,
                    max_steps=250):
     """Returns (passed, smallest body gap, lateral position at the box, steering reversals,
     speed at the box)."""
@@ -91,7 +91,7 @@ def drive_past_box(cfg, inflation, box, wall, speed, seed, pose_noise=0.0, start
     course = jnp.asarray(np.column_stack((xs, 0 * xs, 0 * xs, 0 * xs + speed)).astype(np.float32))
     grid = c.og.OccupancyGrid.create(
         width=3.0, height=7.0, middle=(1.5, 1.0), resolution=0.05, num_beams=811,
-        inflation_radius=inflation, distance_cap=inflation + 0.25)
+        inflation_radius=inflation, distance_cap=inflation + clearance_range)
     state = c.ControllerState(jax.random.PRNGKey(seed), jnp.zeros((cfg.H, cfg.NU)),
                               jnp.broadcast_to(jnp.array(cfg.U_STD), (cfg.H, cfg.NU)))
     x = np.array([0.0, 0.0, 0.0, speed if start_speed is None else start_speed], np.float32)
@@ -137,7 +137,7 @@ def main():
                         help='std of the localization error [m]; the yaw gets half of it in rad')
     args = parser.parse_args()
 
-    cfg, inflation = load_config(args.config)
+    cfg, inflation, clearance_range = load_config(args.config)
     cfg = replace(cfg, MAX_SPEED=max(cfg.MAX_SPEED, args.speed))
     print(f'inflation {inflation} m, q {cfg.Q}, steering delay {cfg.steering_delay_steps * cfg.DT:.2f} s, '
           f'box {args.box_left:+.2f} m from route at {args.box_ahead} m, corridor +-{args.wall} m, '
@@ -145,7 +145,7 @@ def main():
     passed = 0
     for seed in range(args.seeds):
         ok, gap, side, reversals, box_speed = drive_past_box(
-            cfg, inflation, (args.box_ahead, args.box_left), args.wall, args.speed, seed,
+            cfg, inflation, clearance_range, (args.box_ahead, args.box_left), args.wall, args.speed, seed,
             args.pose_noise, args.start_speed)
         passed += ok and gap > 0
         verdict = 'passed' if ok and gap > 0 else 'CONTACT' if gap <= 0 else 'stopped'
