@@ -168,44 +168,6 @@ def trajectory_to_car_frame(ref_traj, x, y, yaw):
     )
 
 
-def body_points(local_traj, cfg):
-    """Points along the car body at each pose: BODY_OFFSETS ahead along its heading.
-
-    The pose is the LiDAR, near the front of the car: checking it alone let the
-    car turn back to the line while the rear half was still beside an obstacle.
-    Returns shape (len(BODY_OFFSETS), N, 3).
-    """
-    offsets = jnp.array(cfg.BODY_OFFSETS)[:, None]
-    heading = local_traj[None, :, 2]
-    xy = local_traj[None, :, :2] + offsets[..., None] * jnp.stack(
-        (jnp.cos(heading), jnp.sin(heading)), axis=-1)
-    return jnp.broadcast_to(local_traj, (offsets.shape[0],) + local_traj.shape).at[..., :2].set(xy)
-
-
-def body_is_free(grid, local_traj, cfg):
-    """Whether every body point of each pose keeps the inflated clearance, shape (N,)."""
-    points = body_points(local_traj, cfg)
-    return jnp.all(jax.vmap(grid.is_free)(points), axis=0)
-
-
-def body_clearance(grid, local_traj, cfg):
-    """Smallest (capped) clearance over the body points of each pose, shape (N,)."""
-    points = body_points(local_traj, cfg)
-    return jnp.min(jax.vmap(grid.clearance)(points), axis=0)
-
-
-def near_obstacle_speed_cost(local_traj, speed, grid, cfg):
-    """Penalty on speed above a cap that falls from full speed to NEAR_OBSTACLE_SPEED
-    as the clearance shrinks to the inflation edge (within distance_cap of obstacles)."""
-    if not cfg.NEAR_OBSTACLE_WEIGHT:
-        return jnp.zeros_like(speed)
-    spec = grid.spec
-    closeness = jnp.clip((spec.distance_cap - body_clearance(grid, local_traj, cfg))
-                         / (spec.distance_cap - spec.inflation_radius), 0.0, 1.0)
-    cap = cfg.MAX_SPEED - closeness * (cfg.MAX_SPEED - cfg.NEAR_OBSTACLE_SPEED)
-    return cfg.NEAR_OBSTACLE_WEIGHT * jnp.maximum(speed - cap, 0.0) ** 2
-
-
 def cost_components(X, U, ref, cfg, grid):
     """Per-timestep objective terms shared by optimization and diagnostics."""
     tracked = db.tracking_state(X, cfg) if cfg.DYNAMICS == 'dynamic' else X
@@ -222,7 +184,7 @@ def cost_components(X, U, ref, cfg, grid):
     local_traj = trajectory_to_car_frame(X[1:], X[0, 0], X[0, 1], X[0, 2])
     
     # Evaluate collisions using the immutable JAX occupancy grid
-    obs_blocked = body_is_free(grid, local_traj, cfg)
+    obs_blocked = grid.is_free(local_traj)
     # Arc length from the car to each rollout point, including the first segment.
     local_xy = jnp.concatenate((jnp.zeros((1, 2)), local_traj[:, :2]), axis=0)
     path_dist = jnp.cumsum(jnp.linalg.norm(jnp.diff(local_xy, axis=0), axis=1))
@@ -231,11 +193,9 @@ def cost_components(X, U, ref, cfg, grid):
     # Grows with how deep the body is inside the inflated zone: once the car is
     # inside it, every sample collides on its first steps, and a flat penalty left
     # no preference for the samples that leave the zone.
-    depth = jnp.maximum(grid.spec.inflation_radius - body_clearance(grid, local_traj, cfg), 0.0)
+    depth = jnp.maximum(grid.spec.inflation_radius - grid.clearance(local_traj), 0.0)
     # Keep timestep costs separate: mppi_update owns horizon/cost-to-go sums.
     obs_block_cost = 10 * jnp.where(~obs_blocked, blocked_penalty * (1.0 + 20.0 * depth), 0.0)
-    near_obstacle = (near_obstacle_speed_cost(local_traj, X[1:, 3], grid, cfg)
-                     if cfg.DYNAMICS == 'kinematic' else jnp.zeros_like(obs_block_cost))
     # obs_block_cost = 0.0
 
     # position error in the frame of the reference: [lag, lateral]. From rest the
@@ -272,13 +232,11 @@ def cost_components(X, U, ref, cfg, grid):
         envelope_cost = cfg.ENVELOPE_WEIGHT * jnp.sum(db.envelope_excess(X[1:], cfg) ** 2, axis=1)
     return dict(tracking=state_cost, control=input_cost,
                 control_change=input_difference_cost, obstacle=obs_block_cost,
-                near_obstacle=near_obstacle,
                 envelope=jnp.broadcast_to(envelope_cost, state_cost.shape))
 
 
 def total_cost(parts):
-    return (parts['tracking'] + parts['control'] + parts['control_change'] + parts['obstacle']
-            + parts['near_obstacle'])
+    return (parts['tracking'] + parts['control'] + parts['control_change'] + parts['obstacle'])
 
 
 class TopPaths(NamedTuple):
@@ -367,7 +325,7 @@ def plan_blocked_steps(U, x0, cfg, grid, steering_prefix=None):
     """How many rollout steps of U put the body inside an inflated obstacle zone."""
     nominal = simulate(x0, U, cfg, steering_prefix)
     local = trajectory_to_car_frame(nominal[1:], x0[0], x0[1], x0[2])
-    return jnp.sum(~body_is_free(grid, local, cfg))
+    return jnp.sum(~grid.is_free(local))
 
 
 def plan_collides(U, x0, cfg, grid, steering_prefix=None):
@@ -376,22 +334,24 @@ def plan_collides(U, x0, cfg, grid, steering_prefix=None):
 
 
 def brake_before_collision(U, x0, cfg, grid, steering_prefix=None):
-    """If the plan still collides, decelerate so it stops STOP_MARGIN before contact.
+    """Brake when the plan runs into an obstacle ahead: stop STOP_MARGIN before it.
 
-    Without this a colliding plan kept the route speed until a way past appeared,
-    which at speed came too late to steer. The constant deceleration v^2 / 2d only
-    lowers the planned acceleration, so the steering and later replanning are kept.
+    Contact means the plan's path comes closer than half the car width (0.16 m) to
+    an obstacle; the inflated margin alone never brakes. Steps already in contact
+    at the start of the plan are skipped, so driving along a close wall keeps its
+    speed. The constant deceleration v^2 / 2d only lowers the planned acceleration.
     """
     nominal = simulate(x0, U, cfg, steering_prefix)
     local = trajectory_to_car_frame(nominal[1:], x0[0], x0[1], x0[2])
-    blocked = ~body_is_free(grid, local, cfg)
+    touching = grid.clearance(local) < 0.16
+    ahead = touching & (jnp.cumsum(~touching) > 0)     # after the first step out of contact
     xy = jnp.concatenate((jnp.zeros((1, 2)), local[:, :2]), axis=0)
     path_dist = jnp.cumsum(jnp.linalg.norm(jnp.diff(xy, axis=0), axis=1))
-    contact = path_dist[jnp.argmax(blocked)]
+    contact = path_dist[jnp.argmax(ahead)]
     room = jnp.maximum(contact - cfg.STOP_MARGIN, 0.05)
     accel = jnp.clip(-x0[3] ** 2 / (2.0 * room), cfg.MIN_ACCEL, 0.0)
     braked = U.at[:, 0].set(jnp.minimum(U[:, 0], accel))
-    return jnp.where(jnp.any(blocked), braked, U)
+    return jnp.where(jnp.any(ahead), braked, U)
 
 
 def reference_side(X, ref):
@@ -622,7 +582,7 @@ def ros_parameter_default(default):
 def config_value(name, default, value):
     """Cast a ROS parameter value to the type of its MPPIConfig default."""
     if isinstance(default, tuple):
-        if len(value) != len(default) and name != 'body_offsets':  # any number of points
+        if len(value) != len(default):
             raise ValueError(f'{name} needs {len(default)} values, got {len(value)}')
         return tuple(float(v) for v in value)
     if isinstance(default, bool):  # checked before int: bool is an int subclass
