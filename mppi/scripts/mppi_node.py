@@ -307,6 +307,23 @@ def select_feasible_controls(U, samples, trajectories, costs, x0, cfg):
     return jnp.where(mean_ok, U, alternative)
 
 
+def select_collision_free_controls(U, samples, costs, obstacle_costs, x0, cfg, grid,
+                                   steering_prefix=None):
+    """Replace a colliding weighted mean by the cheapest collision-free sample.
+
+    With an obstacle on the route, passing left and passing right are equally good
+    and their weighted average drives straight into it. Committing to the best clear
+    sample picks a side; the next warm start keeps it.
+    """
+    nominal = simulate(x0, U, cfg, steering_prefix)
+    local = trajectory_to_car_frame(nominal[1:], x0[0], x0[1], x0[2])
+    mean_collides = jnp.any(~grid.is_free(local))
+    sample_collides = jnp.any(obstacle_costs > 0, axis=1)
+    score = jnp.where(sample_collides, jnp.inf, jnp.sum(costs, axis=1))
+    best = samples[jnp.argmin(score)]
+    return jnp.where(mean_collides & jnp.any(~sample_collides), best, U)
+
+
 def sample_rollout_controls(key, U, U_std, x0, cfg):
     """Sample bounded commands and preserve the current nominal as a candidate."""
     samples = sample_controls(key, U, U_std, cfg)
@@ -339,6 +356,9 @@ def mppi_update(key, U, U_std, x0, ref, cfg, grid, *, steering_prefix=None,
     U_new = jnp.sum(weights[:, :, jnp.newaxis] * U_samples, axis=0)
     if cfg.DYNAMICS == 'dynamic':
         U_new = select_feasible_controls(U_new, U_samples, X_samples, C, x0, cfg)
+    else:
+        U_new = select_collision_free_controls(
+            U_new, U_samples, C, parts['obstacle'], x0, cfg, grid, steering_prefix)
 
     # Bonus: covariance update, Sigma_t = sum_k w[k, t] (u_k[t] - U_t)(u_k[t] - U_t)^T.
     # The truncated sampler draws each input independently, so it keeps the
