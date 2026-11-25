@@ -45,7 +45,7 @@ export ACADOS_SOURCE_DIR="$HOME/acados"
 export LD_LIBRARY_PATH="$ACADOS_SOURCE_DIR/lib:$ACADOS_SOURCE_DIR/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
 cd ~/sim_ws
-colcon build --packages-select mppi --cmake-args \
+colcon build --packages-select hybrid_mppi --cmake-args \
   -DMPPI_BUILD_ACADOS=ON \
   -DACADOS_ROOT="$ACADOS_SOURCE_DIR"
 source install/setup.bash
@@ -62,7 +62,7 @@ Makefile. acados remains an external dependency; colcon does not download it.
 For the checked-in 40-step, 6 m/s formulation:
 
 ```bash
-ros2 launch mppi car_launch.py \
+ros2 launch hybrid_mppi car_launch.py \
   odom_topic:=/ego_racecar/odom \
   tracker:=acados use_cpu:=true horizon:=40 max_speed:=6.0
 ```

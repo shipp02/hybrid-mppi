@@ -1,6 +1,6 @@
 """What the autograder runs on Levine (levine_blocked, three laps, and the pose checks):
 
-    ros2 launch mppi levine_launch.py
+    ros2 launch hybrid_mppi levine_launch.py
 
 Everything the graded run needs goes here: the nodes to start, the waypoints
 to follow and the parameter values that suit Levine (spielberg_launch.py is
@@ -26,7 +26,7 @@ PARAMETERS = {
 def generate_launch_description():
     return LaunchDescription([
         Node(
-            package='mppi',
+            package='hybrid_mppi',
             executable=EXECUTABLE,
             output='screen',
             parameters=[PARAMETERS],

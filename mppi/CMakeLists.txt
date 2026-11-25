@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.18)
-project(mppi)
+project(hybrid_mppi)
 
 # Find dependencies
 foreach(PACKAGE

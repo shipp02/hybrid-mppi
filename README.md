@@ -4,7 +4,7 @@
 
 ```
 ros2 bag play --clock --rate 0.1 ../rosbags/lidar_grid_debug/
-ros2 run mppi mppi_node.py --ros-args      -p odom_topic:=/pf/pose/odom      -p track:=levine   -p use_cpu:=true      -p publish_occupancy_grid:=true -p use_sim_time:=true
+ros2 run hybrid_mppi mppi_node.py --ros-args      -p odom_topic:=/pf/pose/odom      -p track:=levine   -p use_cpu:=true      -p publish_occupancy_grid:=true -p use_sim_time:=true
 ```
 
 ```
@@ -241,13 +241,13 @@ Both maps come with a centerline. You can check your lap count and lap time usin
 **One launch file per track.** The autograder tests your code using the two launch files in the `mppi/launch/` folder:
 
 ```bash
-ros2 launch mppi levine_launch.py      # three laps of Levine (and the pose checks)
-ros2 launch mppi spielberg_launch.py   # one lap of Spielberg
+ros2 launch hybrid_mppi levine_launch.py      # three laps of Levine (and the pose checks)
+ros2 launch hybrid_mppi spielberg_launch.py   # one lap of Spielberg
 ```
 
 You can edit these launch files for your specific setup; i.e: set `EXECUTABLE` to the node you wrote (`mppi_node.py` by default). Each launch file passes `track` (`levine` or `spielberg`) to your node so it knows which waypoints to load. For Spielberg the simulator ships a centerline and an optimised raceline, `maps/Spielberg_centerline.csv` and `maps/Spielberg_raceline.csv`: you may use either, reshape them, or make your own.
 
-**Ship your waypoints with your package.** Put your CSV files in `mppi/waypoints/`; the skeleton's `CMakeLists.txt` installs that folder by default. To get the CSV file from your node, use `get_package_share_directory('mppi')` (from `ament_index_python.packages`) so you can fetch the installed files. A path like `/home/you/sim_ws/...` only exists on your machine, so when the autograder runs your node, it would die at start-up because the absolute path is not the same as the autograder's workspace.
+**Ship your waypoints with your package.** Put your CSV files in `mppi/waypoints/`; the skeleton's `CMakeLists.txt` installs that folder by default. To get the CSV file from your node, use `get_package_share_directory('hybrid_mppi')` (from `ament_index_python.packages`) so you can fetch the installed files. A path like `/home/you/sim_ws/...` only exists on your machine, so when the autograder runs your node, it would die at start-up because the absolute path is not the same as the autograder's workspace.
 
 ## IX. Deliverables and Submission
 

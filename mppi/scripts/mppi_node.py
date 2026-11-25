@@ -607,10 +607,10 @@ class MPPI(Node):
         self._grid_frames = None
 
         # TODO: load the waypoints of `track` from the package's installed waypoints/ folder:
-        #       os.path.join(get_package_share_directory('mppi'), 'waypoints', <your csv>)
+        #       os.path.join(get_package_share_directory('hybrid_mppi'), 'waypoints', <your csv>)
         #       (ament_index_python.packages). A path like /home/you/... only exists on your laptop.
         waypoint_path = os.path.join(
-            get_package_share_directory('mppi'),
+            get_package_share_directory('hybrid_mppi'),
             'waypoints',
             track if track.endswith('.csv') else track + '.csv'
         )
@@ -691,11 +691,11 @@ class MPPI(Node):
         prebuilt_directory = self.get_parameter('tracker_prebuilt_dir').value
         if not prebuilt_directory:
             prebuilt_directory = os.path.join(
-                get_package_prefix('mppi'), 'lib', 'mppi', 'acados_tracker')
+                get_package_prefix('hybrid_mppi'), 'lib', 'hybrid_mppi', 'acados_tracker')
         if not os.path.isfile(os.path.join(prebuilt_directory, 'acados_ocp.json')):
             raise RuntimeError(
                 'Installed acados tracker missing; rebuild with '
-                'colcon build --packages-select mppi --cmake-args -DMPPI_BUILD_ACADOS=ON')
+                'colcon build --packages-select hybrid_mppi --cmake-args -DMPPI_BUILD_ACADOS=ON')
         return AcadosTracker(
             self.config,
             max_steer_rate=self.get_parameter('tracker_max_steer_rate').value,

@@ -13,7 +13,7 @@ defaults are starting estimates, not identified parameters.
 Source your ROS environment, then build from your colcon workspace root:
 
 ```bash
-colcon build --packages-select mppi --symlink-install --cmake-args -DMPPI_BUILD_ACADOS=OFF
+colcon build --packages-select hybrid_mppi --symlink-install --cmake-args -DMPPI_BUILD_ACADOS=OFF
 source install/setup.bash
 ```
 
@@ -21,7 +21,7 @@ Start the simulator separately. Stop any other controller publishing `/drive`.
 For an initial Levine simulation run:
 
 ```bash
-ros2 run mppi mppi_node.py --ros-args \
+ros2 run hybrid_mppi mppi_node.py --ros-args \
   -p track:=levine \
   -p odom_topic:=/ego_racecar/odom \
   -p dynamics:=dynamic -p tracker:=none \
@@ -39,7 +39,7 @@ judging steady-state behavior.
 The existing configurable launch also accepts dynamic mode:
 
 ```bash
-ros2 launch mppi car_launch.py \
+ros2 launch hybrid_mppi car_launch.py \
   odom_topic:=/ego_racecar/odom track:=levine \
   dynamics:=dynamic tracker:=none use_cpu:=true horizon:=20 max_speed:=2.0
 ```

@@ -21,7 +21,7 @@ def launch_controller(context):
         if argument.perform(context):
             overrides[name] = ParameterValue(argument, value_type=value_type)
     return [Node(
-        package='mppi',
+        package='hybrid_mppi',
         executable='mppi_node.py',
         output='screen',
         parameters=[LaunchConfiguration('config_file'), overrides],
@@ -35,7 +35,7 @@ def generate_launch_description():
             description='Override localization odometry topic (map frame, e.g. /pf/pose/odom)'),
         DeclareLaunchArgument(
             'config_file', default_value=os.path.join(
-                get_package_share_directory('mppi'), 'config', 'car_config.yaml'),
+                get_package_share_directory('hybrid_mppi'), 'config', 'car_config.yaml'),
             description='Car ROS parameter file'),
         DeclareLaunchArgument(
             'track', default_value='levine_waypoints', description='Override waypoint track name'),
