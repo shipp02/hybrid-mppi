@@ -38,6 +38,7 @@ class MPPIConfig:
     MAX_ACCEL: float = 3.0  # maximum acceleration [m/ss]
     MIN_SPEED: float = 0.0  # minimum speed [m/s]
     MAX_SPEED: float = 2.0  # maximum speed [m/s]
+    MAX_SPEED_LEAD: float = 1.0  # kinematic: setpoint may exceed measured speed by this [m/s]
 
     # Dynamic bicycle starting estimates, NOT identified real-car parameters.
     MASS: float = 3.5  # kg
@@ -67,6 +68,8 @@ class MPPIConfig:
             raise ValueError('dynamics must be kinematic or dynamic')
         if self.H < 1 or self.T < 1:
             raise ValueError('horizon and num_samples must be positive')
+        if not math.isfinite(self.MAX_SPEED_LEAD) or self.MAX_SPEED_LEAD <= 0:
+            raise ValueError('max_speed_lead must be finite and positive')
         if not math.isfinite(self.STEERING_CURVATURE_GAIN) or self.STEERING_CURVATURE_GAIN <= 0:
             raise ValueError('steering_curvature_gain must be finite and positive')
         if self.STEERING_CURVATURE_GAIN != 1.0 and self.DYNAMICS != 'kinematic':

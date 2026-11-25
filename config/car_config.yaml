@@ -20,6 +20,12 @@ mppi_node:
     max_speed: 3.0
     # Floor on the published speed [m/s]. Keep 0: negative would plan reversing.
     min_speed: 0.0
+    # How far the speed setpoint may run ahead of the measured speed [m/s].
+    # The setpoint integrates the planned acceleration, so from rest it rises at
+    # max_accel until the car moves (the motor needs a clear setpoint to start).
+    #   tune: lower if the car lurches at start; raise if it starts too gently.
+    #   effect: also caps the setpoint when the car is blocked or the wheels slip.
+    max_speed_lead: 1.0
 
     # ------------------------------------------------------------ localization & runtime
     # Map-frame pose (particle filter). Not /odom, which is wheel odometry only.

@@ -512,6 +512,17 @@ def config_value(name, default, value):
     return type(default)(value)
 
 
+def kinematic_speed_setpoint(previous_setpoint, measured_speed, accel, cfg):
+    """Next speed setpoint: the planned acceleration integrated on the last setpoint.
+
+    Integrating on the measured speed stalls at rest: accel * DT (at most 0.15 m/s) is
+    too little for the motor to start the car, so the measured speed never rises. The
+    lead limit keeps the setpoint near the real speed when the car is blocked or slips.
+    """
+    setpoint = min(previous_setpoint + accel * cfg.DT, measured_speed + cfg.MAX_SPEED_LEAD)
+    return float(np.clip(setpoint, cfg.MIN_SPEED, cfg.MAX_SPEED))
+
+
 def route_speed_at(waypoints, x, y):
     """Target speed of the waypoint nearest to (x, y); waypoints are [x, y, yaw, v]."""
     nearest = np.argmin((waypoints[:, 0] - x) ** 2 + (waypoints[:, 1] - y) ** 2)
@@ -1008,13 +1019,13 @@ class MPPI(Node):
         drive_msg.header.stamp = now.to_msg()
         drive_msg.drive.steering_angle = float(action[1])
 
-        previous_speed = x0[7] if self.config.DYNAMICS == 'dynamic' else x0[3]
-        target_speed = previous_speed + float(action[0]) * self.config.DT
-        target_speed = np.clip(
-            target_speed,
-            self.config.MIN_SPEED,
-            self.config.MAX_SPEED,
-        )
+        if self.config.DYNAMICS == 'dynamic':
+            # x0[7] is the previous setpoint, exactly as the dynamic rollout integrates it.
+            target_speed = np.clip(x0[7] + float(action[0]) * self.config.DT,
+                                   self.config.MIN_SPEED, self.config.MAX_SPEED)
+        else:
+            target_speed = kinematic_speed_setpoint(
+                self._last_drive_command[1], x0[3], float(action[0]), self.config)
 
         drive_msg.drive.speed = float(target_speed)
         self._send_drive_command(drive_msg)
