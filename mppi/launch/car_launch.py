@@ -3,9 +3,16 @@ from launch import LaunchDescription
 from ament_index_python.packages import get_package_share_directory
 from launch.actions import DeclareLaunchArgument, OpaqueFunction
 import os
+import shlex
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
+
+
+def interpreter_prefix(context):
+    """Run the node with the configured Python; empty keeps the script shebang."""
+    python = LaunchConfiguration('python_executable').perform(context)
+    return shlex.quote(os.path.expanduser(python)) if python else None
 
 
 def launch_controller(context):
@@ -24,12 +31,18 @@ def launch_controller(context):
         package='hybrid_mppi',
         executable='mppi_node.py',
         output='screen',
+        prefix=interpreter_prefix(context),
+        # Jetson CPU and GPU share memory: allocate on demand instead of 75% upfront.
+        additional_env={'XLA_PYTHON_CLIENT_PREALLOCATE': 'false'},
         parameters=[LaunchConfiguration('config_file'), overrides],
     )]
 
 
 def generate_launch_description():
     return LaunchDescription([
+        DeclareLaunchArgument(
+            'python_executable', default_value='~/car_jax_setup/.venv-jax/bin/python',
+            description='Python that runs the node (needs JAX); empty uses the script shebang'),
         DeclareLaunchArgument(
             'odom_topic', default_value='/pf/pose/odom',
             description='Override localization odometry topic (map frame, e.g. /pf/pose/odom)'),
