@@ -23,7 +23,15 @@
         "/mppi/waypoints": { "visible": true },
         "/mppi/selected_paths": { "visible": true },
         "/mppi/top_paths": { "visible": true },
-        "/mppi/occupancy_grid": { "visible": true, "colorMode": "costmap" },
+        "/mppi/occupancy_grid": {
+          "visible": true,
+          "colorMode": "custom",
+          "minColor": "#00000000",
+          "maxColor": "#ff9800e6",
+          "unknownColor": "#00000000",
+          "invalidColor": "#00000000",
+          "frameLocked": false
+        },
         "/pf/viz/inferred_pose": { "visible": true, "type": "arrow" },
         "/pf/viz/particles": { "visible": false },
         "/pf/viz/fake_scan": { "visible": false }

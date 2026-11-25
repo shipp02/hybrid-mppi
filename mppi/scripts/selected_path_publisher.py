@@ -293,6 +293,7 @@ def build_occupancy_grid(cells, pose, stamp, shared, frame):
     message.info.width, message.info.height = cells.shape
     message.info.origin.position.x = float(x + np.cos(yaw) * forward - np.sin(yaw) * left)
     message.info.origin.position.y = float(y + np.sin(yaw) * forward + np.cos(yaw) * left)
+    message.info.origin.position.z = 0.02  # above the map plane, which would hide it
     message.info.origin.orientation.z = float(np.sin(yaw / 2))
     message.info.origin.orientation.w = float(np.cos(yaw / 2))
     # Controller cell codes: UNKNOWN=1, FREE=2, OCCUPIED=3.
