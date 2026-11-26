@@ -12,21 +12,23 @@ class MPPIConfig:
     H: int = 40  # horizon length
     DT: float = 0.050  # time step [s]
     INTEGRATOR: str = "rk4"  # "euler" or "rk4" (bonus)
-    SAMPLING: str = "uniform"  # "clip", or bonus: "truncated" (normal) or "uniform"
+    SAMPLING: str = "truncated"  # "clip", or bonus: "truncated" (normal) or "uniform"
     COV_UPDATE: bool = True  # bonus: adapt the sampling std of each step
 
     # ---------------------------------------------------
     # TODO: you may need to tune the following parameters
-    LAMBDA: float = 0.1  # temperature
-    U_STD: tuple = (1.5, 0.15)  # std of the sampled inputs [a, delta]
-    NOISE_RHO: float = 0.9  # correlation of the sampled noise from one step to the next
-    U_STD_MIN: tuple = (0.3, 0.03)  # covariance update: floor of the std
+    LAMBDA: float = 0.6  # temperature
+    U_STD: tuple = (1.5, 0.25)  # std of the sampled inputs [a, delta]
+    NOISE_RHO: float = 0.4  # correlation of the sampled noise from one step to the next
+    U_STD_MIN: tuple = (1.0, 0.20)  # covariance update: floor of the std
     COV_ALPHA: float = 0.5  # covariance update: blend of the new std
     # cost() weights the position error along the reference (lag) and across it (lateral)
-    Q: tuple = (1.0, 20.0, 2.0, 1.0)  # state error cost [lag, lateral, yaw, v]
-    Qf: tuple = (2.0, 40.0, 4.0, 1.0)
+    Q: tuple = (0.1, 0.2, 0.2, 0.1)  # state error cost [lag, lateral, yaw, v]
+    Qf: tuple = (0.2, 0.4, 0.4, 0.1)
     R: tuple = (0.01, 1.0)  # input cost [a, delta]
     Rd: tuple = (0.01, 1.0)  # input difference cost [a, delta]
+    CLEARANCE_MARGIN: float = 0.10  # desired extra clearance beyond obstacle inflation [m]
+    CLEARANCE_WEIGHT: float = 0.0  # per-step cost at the inflated boundary; zero disables
     # ---------------------------------------------------
 
     WB: float = 0.33  # Wheelbase [m]
@@ -63,6 +65,10 @@ class MPPIConfig:
 
     def __post_init__(self):
         """Reject unusable settings before tracing any rollout."""
+        if not math.isfinite(self.CLEARANCE_MARGIN) or self.CLEARANCE_MARGIN <= 0:
+            raise ValueError('clearance_margin must be finite and positive')
+        if not math.isfinite(self.CLEARANCE_WEIGHT) or self.CLEARANCE_WEIGHT < 0:
+            raise ValueError('clearance_weight must be finite and nonnegative')
         if self.DYNAMICS not in ('kinematic', 'dynamic'):
             raise ValueError('dynamics must be kinematic or dynamic')
         if not math.isfinite(self.STEERING_CURVATURE_GAIN) or self.STEERING_CURVATURE_GAIN <= 0:

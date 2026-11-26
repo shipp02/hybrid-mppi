@@ -11,7 +11,7 @@ import numpy as np
 HISTORY_SIZE = 10
 PUBLISH_PERIOD = 0.5
 TOPIC = '/mppi/selected_paths'
-COST_NAMES = ('tracking', 'control', 'control_change', 'obstacle', 'envelope')
+COST_NAMES = ('tracking', 'control', 'control_change', 'obstacle', 'envelope', 'clearance')
 
 
 @dataclass(frozen=True)
@@ -30,7 +30,8 @@ class SharedTopPaths:
     def __init__(self, context, points, capacity=50):
         self.points = points
         self.capacity = capacity
-        self._size = capacity * points * 2 + capacity * 6 + (points - 1) * 5
+        self._size = (capacity * points * 2 + capacity * (1 + len(COST_NAMES))
+                      + (points - 1) * len(COST_NAMES))
         self._data = context.RawArray('f', self._size)
         self._count = context.RawValue('i', 0)
         self._stamp = context.RawValue('q', 0)
@@ -45,7 +46,7 @@ class SharedTopPaths:
         steps = np.stack([paths.best_steps[name] for name in COST_NAMES], axis=1)
         data = np.concatenate((paths.xy.ravel(), paths.totals.ravel(),
                                components.ravel(), steps.ravel()))
-        if steps.shape != (self.points - 1, 5) or not self._lock.acquire(False):
+        if steps.shape != (self.points - 1, len(COST_NAMES)) or not self._lock.acquire(False):
             return False
         try:
             np.frombuffer(self._data, dtype=np.float32)[:len(data)] = data
@@ -62,11 +63,13 @@ class SharedTopPaths:
             count, stamp, sequence = self._count.value, self._stamp.value, self._sequence.value
         xy_end = count * self.points * 2
         totals_end = xy_end + count
-        components_end = totals_end + count * 5
+        components_end = totals_end + count * len(COST_NAMES)
+        steps_end = components_end + (self.points - 1) * len(COST_NAMES)
         return TopPathSnapshot(
             data[:xy_end].reshape(count, self.points, 2),
-            data[xy_end:totals_end], data[totals_end:components_end].reshape(count, 5),
-            data[components_end:components_end + (self.points - 1) * 5].reshape(-1, 5),
+            data[xy_end:totals_end],
+            data[totals_end:components_end].reshape(count, len(COST_NAMES)),
+            data[components_end:steps_end].reshape(-1, len(COST_NAMES)),
             stamp, sequence)
 
 

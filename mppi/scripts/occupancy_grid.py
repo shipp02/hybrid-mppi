@@ -15,7 +15,7 @@ L_OCC = 0.85
 L_FREE = -0.4
 L_MIN, L_MAX = -4.0, 4.0          # clamp so stale evidence can always be overwritten
 OCCUPIED_THRESHOLD = 0.5
-UNKNOWN_IS_OBSTACLE = False        # True = conservative: unobserved cells count as blocked
+UNKNOWN_IS_OBSTACLE = True # True = conservative: unobserved cells count as blocked
 
 UNKNOWN, FREE, OCCUPIED = 1, 2, 3  # same values as CellState
 

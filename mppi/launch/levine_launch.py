@@ -19,7 +19,10 @@ PARAMETERS = {
     'track': 'levine',
     'use_cpu': True,
     'odom_topic' : '/ego_racecar/odom',
-    'publish_selected_paths': False
+    'publish_selected_paths': True,
+    'publish_top_paths': True,
+    'clearance_weight': 1000.0,
+    'max_speed' : 3.0
 }
 
 

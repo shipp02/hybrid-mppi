@@ -182,15 +182,21 @@ def cost_components(X, U, ref, cfg, grid):
     local_traj = trajectory_to_car_frame(X[1:], X[0, 0], X[0, 1], X[0, 2])
     
     # Evaluate collisions using the immutable JAX occupancy grid
-    obs_blocked = grid.is_free(local_traj)
+    point_blocked = ~grid.is_free(local_traj)
+    # Once a rollout hits an obstacle, penalize every remaining timestep.
+    blocked_from_here = jnp.cumsum(point_blocked, axis=0) > 0
     # Arc length from the car to each rollout point, including the first segment.
     local_xy = jnp.concatenate((jnp.zeros((1, 2)), local_traj[:, :2]), axis=0)
     path_dist = jnp.cumsum(jnp.linalg.norm(jnp.diff(local_xy, axis=0), axis=1))
     # Distance in meters: 10 at the car, 5 at 1 m, decreasing farther ahead.
-    blocked_penalty = 1e1 / (1.0 + path_dist)
-    # Keep timestep costs separate: mppi_update owns horizon/cost-to-go sums.
-    obs_block_cost = 10 * jnp.where(~obs_blocked, blocked_penalty, 0.0)
+    # blocked_penalty = 1e1 / (1.0 + path_dist)
+    # Keep timestep costs separate: mppi_update owns full-trajectory sums.
+    obs_block_cost = jnp.where(blocked_from_here, 1000.0, 0.0)
     # obs_block_cost = 0.0
+
+    clearance_cost = jnp.zeros_like(obs_block_cost)
+    if cfg.CLEARANCE_WEIGHT > 0:
+        clearance_cost = obstacle_clearance_cost(local_traj, cfg, grid)
 
     # position error in the frame of the reference: [lag, lateral]. From rest the
     # reference runs ahead of the car, and a plain x/y error is then all lag,
@@ -226,11 +232,20 @@ def cost_components(X, U, ref, cfg, grid):
         envelope_cost = cfg.ENVELOPE_WEIGHT * jnp.sum(db.envelope_excess(X[1:], cfg) ** 2, axis=1)
     return dict(tracking=state_cost, control=input_cost,
                 control_change=input_difference_cost, obstacle=obs_block_cost,
-                envelope=jnp.broadcast_to(envelope_cost, state_cost.shape))
+                envelope=jnp.broadcast_to(envelope_cost, state_cost.shape),
+                clearance=clearance_cost)
+
+
+def obstacle_clearance_cost(local_traj, cfg, grid):
+    """Penalize proximity inside the desired margin beyond obstacle inflation."""
+    target = grid.spec.inflation_radius + cfg.CLEARANCE_MARGIN
+    shortfall = jnp.maximum((target - grid.clearance(local_traj)) / cfg.CLEARANCE_MARGIN, 0.0)
+    return cfg.CLEARANCE_WEIGHT * shortfall ** 2
 
 
 def total_cost(parts):
-    return (parts['tracking'] + parts['control'] + parts['control_change'] + parts['obstacle'])
+    return (parts['tracking'] + parts['control'] + parts['control_change']
+            + parts['obstacle'] + parts['envelope'] + parts['clearance'])
 
 
 class TopPaths(NamedTuple):
@@ -325,25 +340,22 @@ def mppi_update(key, U, U_std, x0, ref, cfg, grid, *, steering_prefix=None,
     C = total_cost(parts)
     if cfg.DYNAMICS == 'dynamic':
         C = jnp.nan_to_num(C, nan=1e6, posinf=1e6, neginf=1e6)
-    S = jnp.flip(jnp.cumsum(jnp.flip(C, axis=1), axis=1), axis=1)
+    # One weight per full trajectory, including the terminal cost once.
+    S = jnp.sum(C, axis=1)
+    S_shifted = S - jnp.min(S)
+    weights = jax.nn.softmax(-S_shifted / cfg.LAMBDA, axis=0)
 
-    # 4. Weight: normalize S[:, t] to [0, 1] over the samples, then softmax
-    S_min = jnp.min(S, axis=0, keepdims=True)
-    S_max = jnp.max(S, axis=0, keepdims=True)
-    S_normalized = (S - S_min) / (S_max - S_min + 1e-6)
-    weights = jax.nn.softmax(-S_normalized / cfg.LAMBDA, axis=0)
-
-    # 5. Update: U_new[t] = sum_k w[k, t] * u_k[t]
-    U_new = jnp.sum(weights[:, :, jnp.newaxis] * U_samples, axis=0)
+    # Apply the same trajectory weight across the entire command sequence.
+    U_new = jnp.sum(weights[:, None, None] * U_samples, axis=0)
     if cfg.DYNAMICS == 'dynamic':
         U_new = select_feasible_controls(U_new, U_samples, X_samples, C, x0, cfg)
 
-    # Bonus: covariance update, Sigma_t = sum_k w[k, t] (u_k[t] - U_t)(u_k[t] - U_t)^T.
+    # Bonus: covariance update, Sigma_t = sum_k w[k] (u_k[t] - U_t)(u_k[t] - U_t)^T.
     # The truncated sampler draws each input independently, so it keeps the
     # diagonal of Sigma_t: the weighted variance of each input. The std is
     # blended with the previous one and floored so the search never collapses.
     variance = jnp.sum(
-        weights[:, :, jnp.newaxis] * (U_samples - U_new) ** 2,
+        weights[:, None, None] * (U_samples - U_new) ** 2,
         axis=0
     )
     U_std_new = (1.0 - cfg.COV_ALPHA) * U_std + cfg.COV_ALPHA * jnp.sqrt(variance)
@@ -386,7 +398,7 @@ class ControlObservation(NamedTuple):
 class OptimizationResult(NamedTuple):
     state: ControllerState
     samples: jax.Array
-    weights: jax.Array
+    weights: jax.Array  # (samples,), shared across all horizon steps
     top_paths: TopPaths | None = None
 
 
@@ -534,7 +546,8 @@ class MPPI(Node):
                       'FRONT_STIFFNESS', 'REAR_STIFFNESS', 'FRONT_DRIVE_FRACTION',
                       'SPEED_RESPONSE_TIME', 'MAX_STEER_RATE', 'DYNAMIC_SUBSTEPS',
                       'BLEND_LOW_SPEED', 'BLEND_HIGH_SPEED', 'LATERAL_RESPONSE_TIME',
-                      'MAX_SIDESLIP', 'MAX_YAW_RATE', 'ENVELOPE_WEIGHT'):
+                      'MAX_SIDESLIP', 'MAX_YAW_RATE', 'ENVELOPE_WEIGHT',
+                      'CLEARANCE_MARGIN', 'CLEARANCE_WEIGHT'):
             default = getattr(MPPIConfig, field)
             self.declare_parameter(field.lower(), default)
             overrides[field] = type(default)(self.get_parameter(field.lower()).value)
@@ -600,8 +613,10 @@ class MPPI(Node):
             middle=(1.5, 1.0),
             resolution=0.05,
             inflation_radius=0.15,
-            num_beams=811,
-            distance_cap=0.25,
+            num_beams=819,
+            # Resolve the whole soft margin instead of penalizing capped free space.
+            distance_cap=max(0.25, 0.15 + self.config.CLEARANCE_MARGIN)
+            if self.config.CLEARANCE_WEIGHT > 0 else 0.25,
         )
         self.grid = None
         self._grid_frames = None

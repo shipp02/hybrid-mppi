@@ -7,5 +7,7 @@ mppi_node:
     publish_selected_paths: true
     publish_occupancy_grid: true
     steering_delay_s: 0.15
+    clearance_margin: 0.10  # extra distance beyond the inflated obstacle boundary [m]
+    clearance_weight: 1.0  # per-step penalty at the inflated boundary
     # 67-inch modeled turning diameter at ±0.35 rad; 1.0 is nominal.
     steering_curvature_gain: 1.09245
