@@ -62,10 +62,11 @@ class DynamicMPPItest(unittest.TestCase):
     def test_braking_fallback_is_not_projected(self):
         bad = jnp.tile(jnp.array([0., .4]), (self.cfg.H, 1))
         bad_X = c.simulate(self.x0, bad, self.cfg)
-        selected = c.select_feasible_controls(bad, bad[None], bad_X[None],
+        selected, fallback = c.select_feasible_controls(bad, bad[None], bad_X[None],
             jnp.zeros((1, self.cfg.H)), self.x0, self.cfg)
         expected = jnp.tile(jnp.array([self.cfg.MIN_ACCEL, 0.]), (self.cfg.H, 1))
         np.testing.assert_array_equal(selected, expected)
+        self.assertTrue(bool(fallback))
 
     def test_weighted_nominal_rejected_in_favor_of_feasible_sample(self):
         bad = jnp.tile(jnp.array([0., .4]), (self.cfg.H, 1))
@@ -74,14 +75,16 @@ class DynamicMPPItest(unittest.TestCase):
         self.assertFalse(bool(c.db.trajectory_is_feasible(bad_X, bad, self.cfg)))
         samples = jnp.stack((bad, self.U))
         trajectories = jnp.stack((bad_X, self.X))
-        selected = c.select_feasible_controls(bad, samples, trajectories,
+        selected, fallback = c.select_feasible_controls(bad, samples, trajectories,
             jnp.zeros((2, self.cfg.H)), self.x0, self.cfg)
         np.testing.assert_array_equal(selected, self.U)
+        self.assertTrue(bool(fallback))
 
     def test_feasible_mean_is_kept(self):
-        selected = c.select_feasible_controls(self.U, self.U[None], self.X[None],
+        selected, fallback = c.select_feasible_controls(self.U, self.U[None], self.X[None],
             jnp.zeros((1, self.cfg.H)), self.x0, self.cfg)
         np.testing.assert_array_equal(selected, self.U)
+        self.assertFalse(bool(fallback))
 
     def test_envelope_and_nonfinite_rejection(self):
         for column, value in ((4, 4.), (5, 10.), (3, -1.), (3, 5.), (0, float('nan'))):

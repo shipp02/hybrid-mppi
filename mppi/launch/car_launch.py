@@ -36,7 +36,9 @@ from launch_ros.parameter_descriptions import ParameterValue
 
 OVERRIDE_TYPES = {'track': str, 'max_speed': float, 'use_cpu': bool}
 METRICS = ('route_speed', 'commanded_speed', 'measured_speed',
-           'compute_ms', 'period_ms', 'odom_age_ms', 'scan_age_ms')
+           'compute_ms', 'period_ms', 'odom_age_ms', 'scan_age_ms',
+           'selected_mode_nominal', 'selected_mode_left', 'selected_mode_right',
+           'fallback_used')
 RECORDED_TOPICS = [
     '/tf', '/tf_static', '/map', '/scan',
     '/odom', '/pf/pose/odom', '/pf/viz/inferred_pose', '/pf/viz/particles',

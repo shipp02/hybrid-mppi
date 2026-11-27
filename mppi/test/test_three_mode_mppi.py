@@ -66,8 +66,12 @@ class ThreeModeMPPItest(unittest.TestCase):
         updates = c.optimize_mppi_modes(
             self.key, proposals, self.std, self.x0, self.ref, self.cfg, self.grid)
         for selected in range(3):
-            U, std, X, weights, top = c.combine_mode_outputs(
-                updates, jnp.asarray(selected), True)
+            flagged = tuple(update._replace(fallback_used=jnp.asarray(mode == 1))
+                            for mode, update in enumerate(updates))
+            U, std, X, weights, selection, top = c.combine_mode_outputs(
+                flagged, jnp.asarray(selected), True)
+            np.testing.assert_array_equal(
+                selection, [selected == 0, selected == 1, selected == 2, selected == 1])
             np.testing.assert_array_equal(U, updates[selected].controls)
             np.testing.assert_array_equal(std, updates[selected].std)
             self.assertEqual(X.shape, (self.cfg.T, self.cfg.H + 1, self.cfg.NX))
@@ -104,7 +108,8 @@ class ThreeModeMPPItest(unittest.TestCase):
         distance = jnp.minimum(jnp.hypot(forward - 1.2, left), self.grid.spec.distance_cap)
         grid = c.replace(self.grid, free_distance=distance)
         self.assertTrue(bool(c.plan_collides(U, x0, cfg, grid)))
-        selected, _, _, weights = c.mppi_step_cov(self.key, U, std, x0, ref, cfg, grid)
+        selected, _, _, weights, selection = c.mppi_step_cov(self.key, U, std, x0, ref, cfg, grid)
+        self.assertEqual(selection.shape, (4,))
         self.assertFalse(bool(c.plan_collides(selected, x0, cfg, grid)))
         active_modes = np.asarray(weights).reshape(3, 4, cfg.H).sum(axis=(1, 2)) > 0
         self.assertEqual(active_modes.sum(), 1)
@@ -119,7 +124,24 @@ class ThreeModeMPPItest(unittest.TestCase):
             jax.block_until_ready(actual)
         self.assertEqual(actual[2].shape[0], self.cfg.T)
         self.assertEqual(actual[0].devices(), self.U.devices())
+        self.assertEqual(actual[4].devices(), self.U.devices())
+        self.assertEqual(actual[4].shape, (4,))
+        self.assertEqual(int(actual[4][:3].sum()), 1)
         np.testing.assert_allclose(actual[3].sum(axis=0), 1., atol=1e-6)
+
+    def test_dynamic_fallback_flag_reports_mean_rejection(self):
+        cfg = c.replace(self.cfg, DYNAMICS='dynamic', H=6)
+        x0 = jnp.array([0., 0., 0., 2., 0., 0., 0., 2.])
+        good = jnp.zeros((cfg.H, cfg.NU))
+        bad = good.at[:, 1].set(.4)
+        samples = jnp.stack((bad, good))
+        trajectories = c.rollout(x0, samples, cfg)
+        costs = jnp.zeros((2, cfg.H))
+        for mean, expected_fallback in ((bad, True), (good, False)):
+            selected, fallback = c.select_feasible_controls(
+                mean, samples, trajectories, costs, x0, cfg)
+            np.testing.assert_array_equal(selected, good)
+            self.assertEqual(bool(fallback), expected_fallback)
 
     def test_small_budget_is_rejected_at_optimizer_entry(self):
         with self.assertRaisesRegex(ValueError, 'num_samples >= 3'):

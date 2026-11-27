@@ -70,10 +70,10 @@ class ControlStepTest(unittest.TestCase):
             v0=obs.x0[3], max_accel=cfg.MAX_ACCEL)
         key, subkey = jax.random.split(state.key)
         if cfg.COV_UPDATE:
-            U, std, samples, weights = controller.mppi_step_cov(
+            U, std, samples, weights, _ = controller.mppi_step_cov(
                 subkey, U, std, obs.x0, ref, cfg, grid)
         else:
-            U, samples, weights = controller.mppi_step(
+            U, samples, weights, _ = controller.mppi_step(
                 subkey, U, obs.x0, ref, cfg, grid)
         return controller.ControllerState(key, U, std), grid, ref, samples, weights
 
@@ -110,6 +110,9 @@ class ControlStepTest(unittest.TestCase):
                 result = controller.control_step(*args, export_path=export_path)
                 jax.block_until_ready(result)
             self.assertEqual(result.action.devices(), self.state.U.devices())
+            self.assertEqual(result.selection_metrics.devices(), self.state.U.devices())
+            self.assertEqual(result.selection_metrics.shape, (4,))
+            self.assertEqual(int(result.selection_metrics[:3].sum()), 1)
 
     def test_callback_dispatches_once(self):
         node = object.__new__(controller.MPPI)

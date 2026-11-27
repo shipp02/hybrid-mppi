@@ -321,7 +321,8 @@ def select_feasible_controls(U, samples, trajectories, costs, x0, cfg):
     best = samples[jnp.argmin(score)]
     braking = jnp.tile(jnp.array([cfg.MIN_ACCEL, 0.]), (cfg.H, 1))
     alternative = jnp.where(jnp.any(sample_ok), best, braking)
-    return jnp.where(mean_ok, U, alternative)
+    selected = jnp.where(mean_ok, U, alternative)
+    return selected, ~mean_ok
 
 
 def mppi_weights(S, cfg, mask=None):
@@ -388,7 +389,7 @@ def pass_on_one_side(U, weights, samples, X, S, costs, obstacle_costs, ref, x0, 
     the sampling noise and made the steering dither). "Least colliding" is no
     collision at all when any sample has none; when the car is already inside an
     inflated zone (every sample collides on its first steps) it is the samples
-    that leave it soonest. Returns (controls, weights).
+    that leave it soonest. Returns (controls, weights, fallback_used).
     """
     blocked = jnp.sum(obstacle_costs > 0, axis=1)
     fewest = blocked == jnp.min(blocked)
@@ -400,7 +401,8 @@ def pass_on_one_side(U, weights, samples, X, S, costs, obstacle_costs, ref, x0, 
     side_mean = jnp.where(plan_blocked_steps(side_mean, x0, cfg, grid, steering_prefix) > blocked[best],
                           samples[best], side_mean)
     use_side = plan_blocked_steps(U, x0, cfg, grid, steering_prefix) > jnp.min(blocked)
-    return jnp.where(use_side, side_mean, U), jnp.where(use_side, side_weights, weights)
+    outputs = (jnp.where(use_side, side_mean, U), jnp.where(use_side, side_weights, weights))
+    return (*outputs, use_side)
 
 
 def sample_rollout_controls(key, U, U_std, x0, cfg):
@@ -415,6 +417,7 @@ class ProposalUpdate(NamedTuple):
     weights: jax.Array
     costs: jax.Array
     parts: dict
+    fallback_used: jax.Array
 
 
 def build_mode_proposals(U, cfg):
@@ -448,9 +451,10 @@ def mppi_update_proposal(key, U, U_std, x0, ref, cfg, grid, *, steering_prefix=N
     # 5. Update: U_new[t] = sum_k w[k, t] * u_k[t]
     U_new = jnp.sum(weights[:, :, jnp.newaxis] * U_samples, axis=0)
     if cfg.DYNAMICS == 'dynamic':
-        U_new = select_feasible_controls(U_new, U_samples, X_samples, C, x0, cfg)
+        U_new, fallback_used = select_feasible_controls(
+            U_new, U_samples, X_samples, C, x0, cfg)
     else:
-        U_new, weights = pass_on_one_side(
+        U_new, weights, fallback_used = pass_on_one_side(
             U_new, weights, U_samples, X_samples, S, C, parts['obstacle'], ref, x0, cfg,
             grid, steering_prefix)
         U_new = brake_before_collision(U_new, x0, cfg, grid, steering_prefix)
@@ -466,7 +470,7 @@ def mppi_update_proposal(key, U, U_std, x0, ref, cfg, grid, *, steering_prefix=N
     U_std_new = (1.0 - cfg.COV_ALPHA) * U_std + cfg.COV_ALPHA * jnp.sqrt(variance)
     U_std_new = jnp.clip(U_std_new, jnp.array(cfg.U_STD_MIN), jnp.array(cfg.U_STD))
 
-    return ProposalUpdate(U_new, U_std_new, X_samples, weights, C, parts)
+    return ProposalUpdate(U_new, U_std_new, X_samples, weights, C, parts, fallback_used)
 
 
 def optimize_mppi_modes(key, proposals, U_std, x0, ref, cfg, grid, steering_prefix=None):
@@ -495,19 +499,21 @@ def select_mode_plan(updates, x0, ref, cfg, grid, steering_prefix=None):
 
 
 def combine_mode_outputs(updates, selected, export_top_paths):
-    """Keep selected covariance/weights; retain all rollout paths for diagnostics."""
+    """Return selected statistics and resident [nominal, left, right, fallback] flags."""
     controls = jnp.stack([update.controls for update in updates])[selected]
     std = jnp.stack([update.std for update in updates])[selected]
     trajectories = jnp.concatenate([update.trajectories for update in updates])
     weights = jnp.concatenate([
         jnp.where(selected == mode, update.weights, 0.)
         for mode, update in enumerate(updates)])
-    outputs = (controls, std, trajectories, weights)
+    fallback_used = jnp.stack([update.fallback_used for update in updates])[selected]
+    selection = jnp.concatenate((jnp.arange(3) == selected, fallback_used[None]))
+    outputs = (controls, std, trajectories, weights, selection)
     if export_top_paths:
         costs = jnp.concatenate([update.costs for update in updates])
         parts = {name: jnp.concatenate([update.parts[name] for update in updates])
                  for name in updates[0].parts}
-        return (*outputs, select_top_paths(trajectories, costs, parts))
+        outputs = (*outputs, select_top_paths(trajectories, costs, parts))
     return outputs
 
 
@@ -525,9 +531,9 @@ def mppi_update(key, U, U_std, x0, ref, cfg, grid, *, steering_prefix=None,
 @partial(jax.jit, static_argnames=("cfg",))
 def mppi_step(key, U, x0, ref, cfg, grid, *, steering_prefix=None):
     U_std = jnp.broadcast_to(jnp.array(cfg.U_STD), (cfg.H, cfg.NU))
-    U_new, _, X_samples, weights = mppi_update(
+    U_new, _, X_samples, weights, selection = mppi_update(
         key, U, U_std, x0, ref, cfg, grid, steering_prefix=steering_prefix)
-    return U_new, X_samples, weights
+    return U_new, X_samples, weights, selection
 
 
 @partial(jax.jit, static_argnames=("cfg",))
@@ -555,6 +561,7 @@ class OptimizationResult(NamedTuple):
     samples: jax.Array
     weights: jax.Array
     top_paths: TopPaths | None = None
+    selection_metrics: jax.Array | None = None
 
 
 class ControlResult(NamedTuple):
@@ -564,6 +571,7 @@ class ControlResult(NamedTuple):
     path_xy: jax.Array | None
     feasible: jax.Array = True
     top_paths: TopPaths | None = None
+    selection_metrics: jax.Array | None = None
 
 
 def prepare_warm_start(state, observation, cfg):
@@ -595,10 +603,11 @@ def optimize_controls(state, observation, reference, grid, cfg, export_top_paths
     outputs = mppi_update(
         sample_key, state.U, state.U_std, observation.x0, reference, cfg, grid,
         steering_prefix=observation.steering_prefix, export_top_paths=export_top_paths)
-    U, updated_std, samples, weights = outputs[:4]
-    top_paths = outputs[4] if export_top_paths else None
+    U, updated_std, samples, weights, selection = outputs[:5]
+    top_paths = outputs[5] if export_top_paths else None
     U_std = updated_std if cfg.COV_UPDATE else state.U_std
-    return OptimizationResult(ControllerState(key, U, U_std), samples, weights, top_paths)
+    return OptimizationResult(
+        ControllerState(key, U, U_std), samples, weights, top_paths, selection)
 
 
 def select_control_outputs(solution, observation, grid, cfg, export_path):
@@ -612,7 +621,8 @@ def select_control_outputs(solution, observation, grid, cfg, export_path):
         if export_path:
             path_xy = nominal[:, :2]
     return ControlResult(
-        solution.state, grid, solution.state.U[0], path_xy, feasible, solution.top_paths)
+        solution.state, grid, solution.state.U[0], path_xy, feasible, solution.top_paths,
+        solution.selection_metrics)
 
 
 @partial(jax.jit, static_argnames=("cfg", "export_path", "export_top_paths"))
@@ -702,18 +712,24 @@ def stamp_age_ms(now_ns, stamp):
 
 
 class ControlMetricsPublisher:
-    """One std_msgs/Float32 topic per metric under /mppi/metrics, for plots and bags."""
+    """Publish /mppi/metrics; mode/fallback counters accumulate once per control tick."""
 
+    COUNTERS = ('selected_mode_nominal', 'selected_mode_left', 'selected_mode_right',
+                'fallback_used')
     NAMES = ('route_speed', 'commanded_speed', 'measured_speed',
-             'compute_ms', 'period_ms', 'odom_age_ms', 'scan_age_ms')
+             'compute_ms', 'period_ms', 'odom_age_ms', 'scan_age_ms') + COUNTERS
 
     def __init__(self, node):
         self._publishers = {
             name: node.create_publisher(Float32, f'/mppi/metrics/{name}', 10)
             for name in self.NAMES}
+        self._counts = dict.fromkeys(self.COUNTERS, 0)
 
-    def publish(self, values):
-        for name, value in values.items():
+    def publish(self, values, selection):
+        increments = jax.device_get(selection)
+        for name, increment in zip(self.COUNTERS, increments):
+            self._counts[name] += int(increment)
+        for name, value in {**values, **self._counts}.items():
             self._publishers[name].publish(Float32(data=float(value)))
 
 
@@ -1055,11 +1071,11 @@ class MPPI(Node):
                 export_top_paths=self.publish_top_paths_enabled)
             self._publish_control_result(result, observation, now)
         else:
-            self._track_and_publish(observation, now)
-        self._publish_metrics(observation, control_start, now)
+            result = self._track_and_publish(observation, now)
+        self._publish_metrics(observation, control_start, now, result.selection_metrics)
         self._log_control_stats(control_start)
 
-    def _publish_metrics(self, observation, control_start, now):
+    def _publish_metrics(self, observation, control_start, now, selection):
         """Speed tracking and latency of this tick; runs before stats advance the period."""
         x0 = observation.x0
         last_start = self._last_control_start
@@ -1071,7 +1087,7 @@ class MPPI(Node):
             'period_ms': (control_start - last_start) * 1e3 if last_start is not None else float('nan'),
             'odom_age_ms': stamp_age_ms(now.nanoseconds, self._latest_odom_stamp),
             'scan_age_ms': stamp_age_ms(now.nanoseconds, self._latest_scan[6]),
-        })
+        }, selection=selection)
 
     def _track_and_publish(self, observation, now):
         """Plan on GPU, track on CPU, then publish one command."""
@@ -1088,12 +1104,13 @@ class MPPI(Node):
         except (RuntimeError, ValueError) as exc:
             self.get_logger().error(f'Tracker rejected command: {exc}', throttle_duration_sec=1.0)
             self._publish_stop(now)
-            return
+            return result
         self._last_tracker_action = tracked[0].copy()
         self._publish_drive(tracked[0], observation.x0, now)
         if self.publish_selected_paths_enabled:
             self.path_publisher.history.try_record(states[:, :2], now.nanoseconds)
         self._publish_top_paths(result.top_paths, now)
+        return result
 
     def _prepare_control_observation(self, now):
         """Validate sensors and compute host-side timing/reset policy."""

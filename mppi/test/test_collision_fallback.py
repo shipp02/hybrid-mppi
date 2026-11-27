@@ -35,7 +35,7 @@ class PassOnOneSideTest(unittest.TestCase):
         C = jnp.broadcast_to(jnp.asarray(costs, jnp.float32)[:, None], obstacle.shape) / self.cfg.H
         S = jnp.flip(jnp.cumsum(jnp.flip(C, axis=1), axis=1), axis=1)
         weights = c.mppi_weights(S, self.cfg)
-        U, _ = c.pass_on_one_side(mean, weights, samples, X, S, C, obstacle, self.ref,
+        U, _, self.fallback_used = c.pass_on_one_side(mean, weights, samples, X, S, C, obstacle, self.ref,
                                   self.x0, self.cfg, self.grid)
         return U
 
@@ -54,6 +54,7 @@ class PassOnOneSideTest(unittest.TestCase):
         U = self.choose(self.straight, samples, [1.0, 2.0, 2.5, 3.0])  # left is cheapest clear
         self.assertFalse(bool(c.plan_collides(U, self.x0, self.cfg, self.grid)))
         self.assertEqual(self.side_of(U), 1.0)
+        self.assertTrue(bool(self.fallback_used))
         # an average of the two left samples, not the right one
         self.assertTrue(0.30 <= float(U[0, 1]) <= 0.35)
 
@@ -61,11 +62,13 @@ class PassOnOneSideTest(unittest.TestCase):
         samples = jnp.stack((self.straight, self.steer(0.35)))
         U = self.choose(self.steer(0.32), samples, [1.0, 2.0])
         np.testing.assert_allclose(U, self.steer(0.32))
+        self.assertFalse(bool(self.fallback_used))
 
     def test_mean_is_kept_when_every_sample_collides(self):
         samples = jnp.stack((self.straight, self.straight))
         U = self.choose(self.straight, samples, [1.0, 1.0])
         np.testing.assert_allclose(U, self.straight)
+        self.assertFalse(bool(self.fallback_used))
 
     def test_colliding_plan_brakes_before_contact(self):
         U = c.brake_before_collision(self.straight, self.x0, self.cfg, self.grid)
