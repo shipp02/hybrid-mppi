@@ -148,6 +148,10 @@ mppi_node:
     noise_rho: 0.9
     # Sampling distribution inside the input limits: uniform, truncated or clip.
     sampling: uniform
+    # Three proposal means: nominal, left pulse, right pulse. After pulse,
+    # added bias is zero; nominal corner steering remains unchanged.
+    steer_bias: 0.15  # rad
+    bias_duration: 0.3  # s
 
     # ------------------------------------------------------------ actuator limits
     # Steering command range [rad]. Must not exceed what the servo really reaches,

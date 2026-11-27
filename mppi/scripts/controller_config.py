@@ -14,6 +14,8 @@ class MPPIConfig:
     INTEGRATOR: str = "rk4"  # "euler" or "rk4" (bonus)
     SAMPLING: str = "uniform"  # "clip", or bonus: "truncated" (normal) or "uniform"
     COV_UPDATE: bool = True  # bonus: adapt the sampling std of each step
+    STEER_BIAS: float = 0.15  # left/right proposal steering pulse [rad]
+    BIAS_DURATION: float = 0.3  # pulse duration, then resume nominal steering [s]
 
     # ---------------------------------------------------
     # TODO: you may need to tune the following parameters
@@ -74,6 +76,10 @@ class MPPIConfig:
             raise ValueError('dynamics must be kinematic or dynamic')
         if self.H < 1 or self.T < 1:
             raise ValueError('horizon and num_samples must be positive')
+        if not math.isfinite(self.STEER_BIAS) or self.STEER_BIAS < 0:
+            raise ValueError('steer_bias must be finite and nonnegative')
+        if not math.isfinite(self.BIAS_DURATION) or self.BIAS_DURATION < 0:
+            raise ValueError('bias_duration must be finite and nonnegative')
         if not math.isfinite(self.MAX_SPEED_LEAD) or self.MAX_SPEED_LEAD <= 0:
             raise ValueError('max_speed_lead must be finite and positive')
         if not math.isfinite(self.CLEARANCE_WEIGHT) or self.CLEARANCE_WEIGHT < 0:

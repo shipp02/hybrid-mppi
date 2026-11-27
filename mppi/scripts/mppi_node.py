@@ -408,8 +408,28 @@ def sample_rollout_controls(key, U, U_std, x0, cfg):
     return sample_controls(key, U, U_std, cfg).at[0].set(U)
 
 
-def mppi_update(key, U, U_std, x0, ref, cfg, grid, *, steering_prefix=None,
-                export_top_paths=False):
+class ProposalUpdate(NamedTuple):
+    controls: jax.Array
+    std: jax.Array
+    trajectories: jax.Array
+    weights: jax.Array
+    costs: jax.Array
+    parts: dict
+
+
+def build_mode_proposals(U, cfg):
+    """Seed nominal, left and right; added steering returns to zero, not opposite."""
+    time = (jnp.arange(cfg.H) + 0.5) * cfg.DT
+    phase = time / max(cfg.BIAS_DURATION, cfg.DT)
+    pulse = jnp.where(time < cfg.BIAS_DURATION,
+                      cfg.STEER_BIAS * jnp.sin(jnp.pi * phase) ** 2, 0.0)
+    steering = U[None, :, 1] + jnp.array([0., 1., -1.])[:, None] * pulse
+    proposals = jnp.broadcast_to(U, (3, *U.shape))
+    return proposals.at[:, :, 1].set(jnp.clip(steering, cfg.MIN_STEER, cfg.MAX_STEER))
+
+
+def mppi_update_proposal(key, U, U_std, x0, ref, cfg, grid, *, steering_prefix=None):
+    """One MPPI pass for one proposal, with existing fallback/braking behavior."""
     U_samples = sample_rollout_controls(key, U, U_std, x0, cfg)
 
     # 2. Simulate: roll out all T sequences from x0
@@ -446,10 +466,60 @@ def mppi_update(key, U, U_std, x0, ref, cfg, grid, *, steering_prefix=None,
     U_std_new = (1.0 - cfg.COV_ALPHA) * U_std + cfg.COV_ALPHA * jnp.sqrt(variance)
     U_std_new = jnp.clip(U_std_new, jnp.array(cfg.U_STD_MIN), jnp.array(cfg.U_STD))
 
-    outputs = (U_new, U_std_new, X_samples, weights)
+    return ProposalUpdate(U_new, U_std_new, X_samples, weights, C, parts)
+
+
+def optimize_mppi_modes(key, proposals, U_std, x0, ref, cfg, grid, steering_prefix=None):
+    """Static three-way split preserves total rollout count, including remainders."""
+    keys = jax.random.split(key, 3)
+    counts = tuple(cfg.T // 3 + (mode < cfg.T % 3) for mode in range(3))
+    return tuple(
+        mppi_update_proposal(keys[mode], proposals[mode], U_std, x0, ref,
+                             replace(cfg, T=count), grid, steering_prefix=steering_prefix)
+        for mode, count in enumerate(counts))
+
+
+def select_mode_plan(updates, x0, ref, cfg, grid, steering_prefix=None):
+    """Compare complete plans using common raw objective, never average modes."""
+    controls = jnp.stack([update.controls for update in updates])
+    trajectories = rollout(x0, controls, cfg, steering_prefix)
+    parts = jax.vmap(cost_components, in_axes=(0, 0, None, None, None))(
+        trajectories, controls, ref, cfg, grid)
+    scores = jnp.sum(total_cost(parts), axis=1)
+    if cfg.DYNAMICS == 'kinematic':
+        # Preserve existing preference for fewer blocked steps, including when
+        # every proposal starts inside an inflated obstacle zone.
+        blocked = jnp.sum(parts['obstacle'] > 0, axis=1)
+        scores = jnp.where(blocked == jnp.min(blocked), scores, jnp.inf)
+    return jnp.argmin(scores)
+
+
+def combine_mode_outputs(updates, selected, export_top_paths):
+    """Keep selected covariance/weights; retain all rollout paths for diagnostics."""
+    controls = jnp.stack([update.controls for update in updates])[selected]
+    std = jnp.stack([update.std for update in updates])[selected]
+    trajectories = jnp.concatenate([update.trajectories for update in updates])
+    weights = jnp.concatenate([
+        jnp.where(selected == mode, update.weights, 0.)
+        for mode, update in enumerate(updates)])
+    outputs = (controls, std, trajectories, weights)
     if export_top_paths:
-        return (*outputs, select_top_paths(X_samples, C, parts))
+        costs = jnp.concatenate([update.costs for update in updates])
+        parts = {name: jnp.concatenate([update.parts[name] for update in updates])
+                 for name in updates[0].parts}
+        return (*outputs, select_top_paths(trajectories, costs, parts))
     return outputs
+
+
+def mppi_update(key, U, U_std, x0, ref, cfg, grid, *, steering_prefix=None,
+                export_top_paths=False):
+    """One parallel MPPI pass per mode, followed by whole-plan selection."""
+    if cfg.T < 3:
+        raise ValueError('three-mode MPPI requires num_samples >= 3')
+    proposals = build_mode_proposals(U, cfg)
+    updates = optimize_mppi_modes(key, proposals, U_std, x0, ref, cfg, grid, steering_prefix)
+    selected = select_mode_plan(updates, x0, ref, cfg, grid, steering_prefix)
+    return combine_mode_outputs(updates, selected, export_top_paths)
 
 
 @partial(jax.jit, static_argnames=("cfg",))
