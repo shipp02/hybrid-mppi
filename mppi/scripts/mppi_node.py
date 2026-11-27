@@ -289,7 +289,7 @@ def sample_controls(key, U, U_std, cfg):
         z = cfg.NOISE_RHO * z_prev + jnp.sqrt(1.0 - cfg.NOISE_RHO ** 2) * e
         return z, z
 
-    _, z = jax.lax.scan(ar1, eps[0], eps[1:])
+    _, z = jax.lax.scan(ar1, eps[0], eps[1:], unroll=4)
     z = jnp.concatenate((eps[:1], z), axis=0).transpose(1, 0, 2)  # (T, H, NU)
 
     if cfg.SAMPLING == "truncated":
@@ -894,7 +894,8 @@ class MPPI(Node):
             if (self.publish_selected_paths_enabled or self.publish_top_paths_enabled
                 or self.publish_occupancy_grid_enabled) else None)
 
-        self.get_logger().info(f'MPPI initialized on {track}; waiting for LiDAR extrinsics')
+        self._sensor_wait_started_at = time.perf_counter()
+        self.get_logger().info(f'MPPI initialized on {track}; waiting for odometry and LiDAR scan')
 
     def _publish_waypoints(self):
         """Publish the course now and once per second with a fresh stamp.
@@ -987,6 +988,7 @@ class MPPI(Node):
 
     def _warm_up(self):
         """Compile only after the actual sensor geometry is available."""
+        start = time.perf_counter()
         observation = ControlObservation(
             np.zeros(self.config.NX, dtype=np.float32),
             np.zeros(self.grid.spec.num_beams, dtype=np.float32),
@@ -1004,7 +1006,8 @@ class MPPI(Node):
                 self.control_state, observation, self.course, self.grid, self.config,
                 export_top_paths=self.publish_top_paths_enabled)
         jax.block_until_ready(result)
-        self.get_logger().info(f'MPPI ready: {self.config}')
+        self.get_logger().info(
+            f'MPPI ready: JAX warmup took {time.perf_counter() - start:.3f} s; {self.config}')
 
     def odom_callback(self, msg):
         """Cache measured motion; actuator command state is attached at each tick."""
@@ -1056,9 +1059,17 @@ class MPPI(Node):
         lidar_pose = self._lookup_lidar_pose(scan_frame, scan_stamp)
         if lidar_pose is None:
             return False
+        if self._grid_frames is None:
+            self.get_logger().info(
+                f'Odometry and LiDAR scan ready after '
+                f'{time.perf_counter() - self._sensor_wait_started_at:.3f} s')
         # Do not leave a previous drive command active during JAX compilation.
         self._publish_stop(self.get_clock().now())
+        grid_start = time.perf_counter()
         self.grid = og.OccupancyGrid.create(lidar_pose=lidar_pose, **self._grid_settings)
+        jax.block_until_ready(self.grid)
+        self.get_logger().info(
+            f'Occupancy grid ready in {time.perf_counter() - grid_start:.3f} s; starting JAX warmup')
         self._warm_up()
         # Compilation pauses are not steady-state control-loop measurements.
         self._control_latencies.clear()

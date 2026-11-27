@@ -23,7 +23,7 @@ UNKNOWN, FREE, OCCUPIED = 1, 2, 3  # same values as CellState
 @dataclass(frozen=True)
 class GridConfig:
     width: float = 3.0
-    height: float = 7.0
+    height: float = 10.0
     middle: tuple[float, float] = (1.5, 1.0)   # (left, forward) offset of the robot in the window
     resolution: float = 0.05
     inflation_radius: float = 0.30
