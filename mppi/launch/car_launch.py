@@ -44,7 +44,8 @@ RECORDED_TOPICS = [
     '/odom', '/pf/pose/odom', '/pf/viz/inferred_pose', '/pf/viz/particles',
     '/drive', '/teleop', '/ackermann_cmd', '/joy', '/sensors/core',
     '/mppi/waypoints', '/mppi/selected_paths', '/mppi/top_paths', '/mppi/best_path_costs',
-    '/mppi/occupancy_grid', *(f'/mppi/metrics/{name}' for name in METRICS),
+    '/mppi/occupancy_grid', '/mppi/map_obstacles',
+    *(f'/mppi/metrics/{name}' for name in METRICS),
     '/rosout',
 ]
 

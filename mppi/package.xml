@@ -22,6 +22,7 @@
   <depend>ament_index_python</depend>
 
   <exec_depend>ros2launch</exec_depend>
+  <exec_depend>python3-scipy</exec_depend>
   <!-- JAX is not a rosdep key: pip install jax -->
 
   <test_depend>ament_lint_auto</test_depend>

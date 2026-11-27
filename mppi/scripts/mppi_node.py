@@ -880,6 +880,7 @@ class MPPI(Node):
         self.declare_parameter('publish_occupancy_grid', False)
         self.publish_occupancy_grid_enabled = self.get_parameter('publish_occupancy_grid').value
         self.last_grid_export = None
+        self.map_obstacles = self._create_map_obstacle_debug()
         self.declare_parameter('publish_selected_paths', False)
         self.publish_selected_paths_enabled = self.get_parameter('publish_selected_paths').value
         self.declare_parameter('path_frame', 'map')
@@ -1017,7 +1018,16 @@ class MPPI(Node):
         self._latest_odom_stamp = msg.header.stamp
         self._odom_child_frame = msg.child_frame_id if msg.child_frame_id else 'odom'
 
+    def _create_map_obstacle_debug(self):
+        """Keep optional CPU perception outside the collision/compute path."""
+        if not self.publish_occupancy_grid_enabled:
+            return None
+        from map_obstacle_debug import MapObstacleDebug
+        return MapObstacleDebug(self)
+
     def scan_callback(self, msg):
+        if self.map_obstacles is not None:
+            self.map_obstacles.observe(msg)
         ranges = np.asarray(msg.ranges, dtype=np.float32).copy()
         self._latest_scan = (
             ranges,

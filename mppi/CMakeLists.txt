@@ -40,6 +40,8 @@ install(PROGRAMS
   scripts/dynamic_bicycle.py
   scripts/selected_path_publisher.py
   scripts/occupancy_grid.py
+  scripts/map_obstacles.py
+  scripts/map_obstacle_debug.py
   scripts/utils.py
   DESTINATION lib/${PROJECT_NAME}
 )

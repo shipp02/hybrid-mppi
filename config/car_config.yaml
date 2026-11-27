@@ -41,6 +41,21 @@ mppi_node:
     publish_top_paths: false       # 50 best samples + costs, /mppi/top_paths
     path_frame: map
 
+    # Map classification markers share publish_occupancy_grid switch; no effect
+    # on collision costs. /mppi/map_obstacles: blue=mapped, red=unmapped,
+    # gray=uncertain, yellow boxes=unmapped clusters (not motion tracks).
+    map_match_allowance: 0.10       # [m], plus half map-cell diagonal
+    map_occupied_threshold: 65      # occupied if /map value >= threshold
+    obstacle_marker_max_scan_age: 0.5  # [s], reject stale scans; marker lifetime
+    cluster_base_gap: 0.08          # [m], additive endpoint spacing allowance
+    cluster_spacing_scale: 2.0      # multiply angular beam spacing
+    cluster_max_link_distance: 0.30 # [m], hard cap even across missing returns
+    cluster_max_invalid_gap: 2      # max skipped beams, never fabricated points
+    cluster_max_angle_gap: 0.035    # [rad], max separation of linked endpoints
+    cluster_min_points: 3           # affects boxes only, never collision evidence
+    cluster_bridge_nan: true
+    cluster_bridge_inf: false      # +inf often means open space, not dropout
+
     # ------------------------------------------------------------ planning horizon
     # Rollout step [s]. ALSO the control period: 0.05 = 20 Hz commands.
     #   tune: lower only if the logged latency stays well below DT.
