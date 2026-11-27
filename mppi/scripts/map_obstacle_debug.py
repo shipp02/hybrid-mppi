@@ -96,7 +96,7 @@ class MapObstacleDebug:
         if key == self.processed:
             return
         try:
-            points, valid = self._map_points(scan, stamp)
+            points, valid = self._map_points(scan)
         except (TransformException, ValueError) as exc:
             self._clear()
             self.node.get_logger().warning(
@@ -108,8 +108,10 @@ class MapObstacleDebug:
         self._publish(scan.header.stamp, points, labels, valid, clusters)
         self.processed = key
 
-    def _map_points(self, scan, stamp):
-        transform = self.node.tf_buffer.lookup_transform(self.frame, scan.header.frame_id, stamp)
+    def _map_points(self, scan):
+        # Latest TF avoids scan-time extrapolation at the cost of temporal alignment.
+        transform = self.node.tf_buffer.lookup_transform(
+            self.frame, scan.header.frame_id, Time())
         points, valid = scan_points(scan.ranges, scan.angle_min, scan.angle_increment,
                                     scan.range_min, scan.range_max)
         rotation = rotation_matrix(transform.transform.rotation)
