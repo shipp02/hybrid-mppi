@@ -1,4 +1,4 @@
-"""Collision-free corridor around the MPPI plan, and the MPC's race-line target.
+"""Clearance-based corridor around the MPPI plan, and the MPC's race-line target.
 
 Hybrid MPPI-MPC after MPPI-IPDDP (Kim et al., arXiv 2208.02439): MPPI gives a
 coarse plan, a corridor of balls B_r(c) around it bounds where the smoothing MPC
@@ -18,11 +18,6 @@ from functools import partial
 import jax
 import jax.numpy as jnp
 
-# Stages the grid cannot vouch for (unknown cells under the car, past the sensor)
-# get this radius: effectively no constraint, matching the tracker's inactive ball.
-UNCONSTRAINED_RADIUS = 10.0
-
-
 def to_car_frame(xy, pose):
     """World [x, y] -> car [forward, left] at pose [x, y, yaw]."""
     c, s = jnp.cos(pose[2]), jnp.sin(pose[2])
@@ -30,17 +25,29 @@ def to_car_frame(xy, pose):
     return jnp.stack((c * d[..., 0] + s * d[..., 1], -s * d[..., 0] + c * d[..., 1]), axis=-1)
 
 
+def corridor_centers_are_usable(local, grid):
+    """Require in-grid free centers instead of trusting clipped edge queries."""
+    row = (local[:, 0] + grid.spec.middle[1]) / grid.spec.resolution
+    col = (local[:, 1] + grid.spec.middle[0]) / grid.spec.resolution
+    rows, cols = grid.spec.shape
+    in_grid = (row >= 0) & (row < rows) & (col >= 0) & (col < cols)
+    return in_grid & grid.is_free(local)
+
+
 @partial(jax.jit, static_argnames=('cfg',))
 def plan_corridor(nominal, scan_pose, grid, cfg):
     """Ball centers ((H+1, 2), world) and radii ((H+1,)) along the MPPI plan.
 
-    scan_pose is the measured pose the grid was built at. A stage whose plan
-    point the grid cannot confirm as free gets an unconstrained ball, so the
-    blind spot under the car never drags the MPC sideways.
+    scan_pose is the measured pose the grid was built at. Blocked, zero-clearance,
+    and out-of-grid centers get radius zero: an invalid-corridor sentinel rejected
+    by the host tracker before solving. Unknown cells follow the grid's occupancy
+    policy; a clearance ball is not a certificate of observed free space.
     """
-    clearance = grid.clearance(to_car_frame(nominal[:, :2], scan_pose))
+    local = to_car_frame(nominal[:, :2], scan_pose)
+    clearance = grid.clearance(local)
     room = clearance - grid.spec.inflation_radius
-    radii = jnp.where(room > 0.0, jnp.minimum(room, cfg.CORRIDOR_R_MAX), UNCONSTRAINED_RADIUS)
+    valid = corridor_centers_are_usable(local, grid) & (room > 0.0)
+    radii = jnp.where(valid, jnp.minimum(room, cfg.CORRIDOR_R_MAX), 0.0)
     return nominal[:, :2], radii
 
 

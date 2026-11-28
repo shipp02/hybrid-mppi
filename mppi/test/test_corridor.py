@@ -49,12 +49,22 @@ class CorridorTest(unittest.TestCase):
         # 0.4 m to the wall, minus the 0.15 m car radius, within one 0.05 m cell
         np.testing.assert_allclose(near_wall, 0.25, atol=0.05)
 
-    def test_nonpositive_room_is_unconstrained(self):
-        # Log-odds grid treats unknown cells as free. Exercise zero room explicitly.
+    def test_nonpositive_room_invalidates_corridor(self):
         from dataclasses import replace
         grid = replace(self.grid, free_distance=jnp.zeros_like(self.grid.free_distance))
         _, radii = cr.plan_corridor(straight_plan(), self.x0, grid, self.cfg)
-        np.testing.assert_allclose(np.asarray(radii), cr.UNCONSTRAINED_RADIUS)
+        np.testing.assert_array_equal(np.asarray(radii), 0.0)
+
+    def test_occupied_centers_are_not_given_large_balls(self):
+        from dataclasses import replace
+        grid = replace(self.grid, log_odds=jnp.ones_like(self.grid.log_odds))
+        _, radii = cr.plan_corridor(straight_plan(), self.x0, grid, self.cfg)
+        np.testing.assert_array_equal(np.asarray(radii), 0.0)
+
+    def test_out_of_grid_centers_are_invalid(self):
+        plan = straight_plan(length=20.)
+        _, radii = cr.plan_corridor(plan, self.x0, self.grid, self.cfg)
+        self.assertEqual(float(radii[-1]), 0.0)
 
     def test_corridor_is_deterministic(self):
         first = cr.plan_corridor(straight_plan(), self.x0, self.grid, self.cfg)
@@ -105,6 +115,19 @@ class TrackerCorridorTest(unittest.TestCase):
     def test_corridor_shape_is_checked(self):
         with self.assertRaisesRegex(ValueError, 'corridor'):
             self.tracker()._load_corridor((np.zeros((2, 2)), np.zeros(2)), np.zeros((4, 4)))
+
+    def test_invalid_corridor_is_rejected_before_setting_solver_balls(self):
+        for radius in (0., -1.):
+            tracker = self.tracker()
+            with self.assertRaisesRegex(ValueError, 'Invalid corridor'):
+                tracker._load_corridor((np.zeros((4, 2)), np.full(4, radius)), np.zeros((4, 4)))
+            tracker.solver.set.assert_not_called()
+
+    def test_valid_disconnected_balls_remain_soft_constraints(self):
+        tracker = self.tracker()
+        centers = np.column_stack((np.arange(4.) * 2., np.zeros(4)))
+        tracker._load_corridor((centers, np.full(4, .1)), np.zeros((4, 4)))
+        self.assertEqual(tracker.solver.set.call_count, 4)
 
 
 class DelayCompensationTest(unittest.TestCase):
@@ -162,6 +185,14 @@ class NodeCorridorTest(unittest.TestCase):
         node._track_and_publish(self.observation(), None)
         node._publish_stop.assert_called_once()
         node._publish_drive.assert_not_called()
+
+    def test_invalid_corridor_stops_without_feeding_back_controls(self):
+        node = self.make_node()
+        node.tracker.solve.side_effect = ValueError('Invalid corridor')
+        node._track_and_publish(self.observation(), None)
+        node._publish_stop.assert_called_once()
+        node._publish_drive.assert_not_called()
+        np.testing.assert_array_equal(node.control_state.U, 0.)
 
 
 if __name__ == '__main__':

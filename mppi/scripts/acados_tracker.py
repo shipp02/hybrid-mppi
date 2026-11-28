@@ -229,6 +229,8 @@ class AcadosTracker:
                 raise ValueError('Invalid corridor horizon dimensions')
             if not (np.isfinite(centers).all() and np.isfinite(radii).all()):
                 raise ValueError('Non-finite corridor')
+            if np.any(radii <= 0.0):
+                raise ValueError('Invalid corridor: blocked, zero-clearance or out-of-grid center')
             balls = np.column_stack((centers, radii))
             weight = self.cfg.CORRIDOR_Q
         stage = np.array(STAGE_WEIGHTS[:-2])
