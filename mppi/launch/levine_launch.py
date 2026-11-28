@@ -25,6 +25,7 @@ PARAMETERS = {
     # smoothed controls warm-start the next MPPI step (needs -DMPPI_BUILD_ACADOS=ON)
     'tracker': 'acados',
     'tracker_reference': 'corridor',
+    'publish_corridor': True,
     'max_speed': 6.0,
     # plan from where the car will be when the command lands (~15 ms compute plus
     # sim stepping); gentler MPC steering corrections are robust to that delay

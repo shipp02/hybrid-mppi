@@ -40,6 +40,7 @@ mppi_node:
     use_cpu: false
     # RViz/Foxglove debug topics. Off saves a little CPU; they never slow control.
     publish_selected_paths: true   # chosen plan, /mppi/selected_paths
+    publish_corridor: true         # MPPI/MPC clearance circles, /mppi/corridor, 2 Hz
     publish_occupancy_grid: true   # local obstacle grid, /mppi/occupancy_grid
     publish_top_paths: false       # 50 best samples + costs, /mppi/top_paths
     path_frame: map

@@ -981,6 +981,9 @@ class MPPI(Node):
         self.map_obstacles = self._create_map_obstacle_debug()
         self.declare_parameter('publish_selected_paths', False)
         self.publish_selected_paths_enabled = self.get_parameter('publish_selected_paths').value
+        self.declare_parameter('publish_corridor', False)
+        self.publish_corridor_enabled = self.get_parameter('publish_corridor').value
+        self.last_corridor_export = None
         self.declare_parameter('path_frame', 'map')
         self._publish_waypoints()
         self.path_publisher = (
@@ -988,9 +991,10 @@ class MPPI(Node):
                 self.config.H + 1, self.get_parameter('path_frame').value,
                 publish_history=self.publish_selected_paths_enabled,
                 publish_top_paths=self.publish_top_paths_enabled,
-                grid_settings=self._grid_settings if self.publish_occupancy_grid_enabled else None)
+                grid_settings=self._grid_settings if self.publish_occupancy_grid_enabled else None,
+                publish_corridor=self.publish_corridor_enabled)
             if (self.publish_selected_paths_enabled or self.publish_top_paths_enabled
-                or self.publish_occupancy_grid_enabled) else None)
+                or self.publish_occupancy_grid_enabled or self.publish_corridor_enabled) else None)
 
         self._sensor_wait_started_at = time.perf_counter()
         self.get_logger().info(f'MPPI initialized on {track}; waiting for odometry and LiDAR scan')
@@ -1228,6 +1232,7 @@ class MPPI(Node):
         states, controls, reference, corridor = jax.device_get(
             (nominal, result.state.U, result.reference, corridor))
         target = None if self.tracker_reference == 'nominal' else reference
+        self._publish_corridor(corridor, now)
         try:
             tracked = self.tracker.solve(
                 planning.x0, states, controls, self._last_tracker_action, target, corridor)
@@ -1343,6 +1348,17 @@ class MPPI(Node):
         self.last_grid_export = current
         self.path_publisher.occupancy_grid.try_record(
             jax.device_get(self.grid.cells), observation.x0, now.nanoseconds)
+
+    def _publish_corridor(self, corridor, now):
+        """Throttle bounded host snapshots; sidecar owns circle construction/ROS."""
+        if not self.publish_corridor_enabled or corridor is None:
+            return
+        current = now.nanoseconds * 1e-9
+        if (self.last_corridor_export is not None
+                and current - self.last_corridor_export < PUBLISH_PERIOD):
+            return
+        if self.path_publisher.corridor.try_record(corridor, now.nanoseconds):
+            self.last_corridor_export = current
 
     def _publish_top_paths(self, top_paths, now):
         """Read back bounded diagnostics; child owns all debug ROS work."""

@@ -115,6 +115,45 @@ class SharedPathHistory:
         return PathSnapshot(xy, stamps, sequence)
 
 
+@dataclass(frozen=True)
+class CorridorSnapshot:
+    balls: np.ndarray
+    stamp: int
+    sequence: int
+
+
+class SharedCorridor:
+    """Latest-only corridor snapshot; control writer never waits for renderer."""
+
+    def __init__(self, context, points):
+        self.points = points
+        self._balls = context.RawArray('f', points * 3)
+        self._stamp = context.RawValue('q', 0)
+        self._sequence = context.RawValue('Q', 0)
+        self._lock = context.Lock()
+
+    def try_record(self, corridor, stamp_ns):
+        centers, radii = (np.asarray(value, dtype=np.float32) for value in corridor)
+        if centers.shape != (self.points, 2) or radii.shape != (self.points,):
+            return False
+        balls = np.column_stack((centers, radii))
+        if not np.isfinite(balls).all() or not self._lock.acquire(False):
+            return False
+        try:
+            np.frombuffer(self._balls, dtype=np.float32)[:] = balls.ravel()
+            self._stamp.value = stamp_ns
+            self._sequence.value += 1
+        finally:
+            self._lock.release()
+        return True
+
+    def snapshot(self):
+        with self._lock:
+            return CorridorSnapshot(
+                np.frombuffer(self._balls, dtype=np.float32).copy().reshape(self.points, 3),
+                self._stamp.value, self._sequence.value)
+
+
 def segment_geometry(xy):
     """LINE_LIST pairs with identical endpoint colors: solid red-to-blue segments."""
     segments = len(xy) - 1
@@ -219,6 +258,48 @@ def build_top_markers(snapshot, frame):
     return result
 
 
+def build_corridor_markers(snapshot, frame):
+    """Horizontal clearance rings; red points show invalid zero-radius stages."""
+    from geometry_msgs.msg import Point
+    from visualization_msgs.msg import Marker, MarkerArray
+
+    result = MarkerArray()
+    angles = np.linspace(0., 2. * np.pi, 33)
+    unit_circle = np.column_stack((np.cos(angles), np.sin(angles)))
+    for index, (x, y, radius) in enumerate(snapshot.balls):
+        valid = radius > 0.
+        kind = Marker.LINE_STRIP if valid else Marker.POINTS
+        marker = debug_marker(frame, snapshot.stamp, 'mpc_corridor', index, kind)
+        marker.scale.x = .015 if valid else .08
+        marker.scale.y = .08
+        marker.color.r = 0. if valid else 1.
+        marker.color.g = .8 if valid else 0.
+        marker.color.b = 1. if valid else 0.
+        xy = np.array([x, y]) + radius * unit_circle if valid else np.array([[x, y]])
+        marker.points = [Point(x=float(px), y=float(py), z=.08) for px, py in xy]
+        result.markers.append(marker)
+    return result
+
+
+class CorridorPublication:
+    """Render newest corridor at 2 Hz in the publisher process, never in control."""
+
+    def __init__(self, node, shared, frame):
+        from visualization_msgs.msg import MarkerArray
+
+        self.shared, self.frame = shared, frame
+        self.sequence = 0
+        self.publisher = node.create_publisher(MarkerArray, '/mppi/corridor', publisher_qos())
+        self.timer = node.create_timer(PUBLISH_PERIOD, self.publish)
+
+    def publish(self):
+        snapshot = self.shared.snapshot()
+        if snapshot.sequence == self.sequence:
+            return
+        self.sequence = snapshot.sequence
+        self.publisher.publish(build_corridor_markers(snapshot, self.frame))
+
+
 class TopPathPublication:
     """Reuse child node/timer and latest-only transport for all debug ROS work."""
 
@@ -318,7 +399,8 @@ class OccupancyGridPublication:
         self.publisher.publish(build_occupancy_grid(cells, pose, stamp, self.shared, self.frame))
 
 
-def run_publisher(history, stop, frame, top_paths=None, publish_history=True, occupancy_grid=None):
+def run_publisher(history, stop, frame, top_paths=None, publish_history=True, occupancy_grid=None,
+                  corridor=None):
     """Spawn entry point: independent ROS node, no inherited CUDA context."""
     import rclpy
     from rclpy.node import Node
@@ -329,6 +411,7 @@ def run_publisher(history, stop, frame, top_paths=None, publish_history=True, oc
     publication = HistoryPublication(node, history, frame) if publish_history else None
     top_publication = TopPathPublication(node, top_paths, frame) if top_paths is not None else None
     grid_publication = OccupancyGridPublication(node, occupancy_grid, frame) if occupancy_grid is not None else None
+    corridor_publication = CorridorPublication(node, corridor, frame) if corridor is not None else None
     try:
         while not stop.is_set() and rclpy.ok():
             rclpy.spin_once(node, timeout_sec=.1)
@@ -343,15 +426,16 @@ class PathPublisherProcess:
     """Own spawned process and bounded shared history; call close on node shutdown."""
 
     def __init__(self, points, frame='map', *, publish_history=True, publish_top_paths=False,
-                 grid_settings=None):
+                 grid_settings=None, publish_corridor=False):
         context = mp.get_context('spawn')
         self.history = SharedPathHistory(context, points)
         self.top_paths = SharedTopPaths(context, points) if publish_top_paths else None
         self.occupancy_grid = SharedOccupancyGrid(context, grid_settings) if grid_settings is not None else None
+        self.corridor = SharedCorridor(context, points) if publish_corridor else None
         self._stop = context.Event()
         self._process = context.Process(target=run_publisher,
             args=(self.history, self._stop, frame, self.top_paths, publish_history,
-                  self.occupancy_grid), daemon=True)
+                  self.occupancy_grid, self.corridor), daemon=True)
         self._process.start()
 
     def close(self):

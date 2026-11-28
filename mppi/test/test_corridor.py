@@ -187,6 +187,7 @@ class NodeCorridorTest(unittest.TestCase):
         node._last_tracker_action = np.zeros(2)
         node.control_state = c.ControllerState(jax.random.PRNGKey(0), jnp.zeros((2, 2)), jnp.ones((2, 2)))
         node.publish_top_paths_enabled = node.publish_selected_paths_enabled = False
+        node.publish_corridor_enabled = False
         node.publish_occupancy_grid_enabled = False
         node._publish_drive, node._publish_stop, node.get_logger = Mock(), Mock(), Mock()
         corridor = (np.zeros((3, 2)), np.full(3, .5))
