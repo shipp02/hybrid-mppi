@@ -52,7 +52,7 @@ class MPPIConfig:
     # ---------------------------------------------------
 
     WB: float = 0.33  # Wheelbase [m]
-    STEERING_CURVATURE_GAIN: float = 1.0  # Applied to tan(steering) / WB in direct kinematic MPPI
+    STEERING_CURVATURE_GAIN: float = 1.0  # Applied to tan(steering + offset) / WB in MPPI/MPC
     STEERING_DELAY_S: float = 0.0  # Steering dead time for direct kinematic MPPI
     STEERING_OFFSET: float = 0.0  # kinematic: wheels point this much left of the command [rad]
     MIN_STEER: float = -0.35  # minimum steering angle [rad]

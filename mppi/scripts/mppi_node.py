@@ -102,13 +102,22 @@ def step(x, u, cfg):
     """
     if cfg.DYNAMICS == 'dynamic':
         return db.step(x, u, cfg)
+    applied = limit_kinematic_acceleration(x, u, cfg)
     if cfg.INTEGRATOR == "rk4":
-        x_next = step_rk4(x, u, cfg)
-    else:
-        x_next = step_euler(x, u, cfg)
-    # the published speed is clipped to [MIN_SPEED, MAX_SPEED], so the rollouts
-    # must be too: otherwise a car at rest plans to reverse and steers backwards
-    return x_next.at[3].set(jnp.clip(x_next[3], cfg.MIN_SPEED, cfg.MAX_SPEED))
+        return step_rk4(x, applied, cfg)
+    return step_euler(x, applied, cfg)
+
+
+def limit_kinematic_acceleration(x, u, cfg):
+    """Bound acceleration before integration, including recovery from noisy speed.
+
+    Saturating endpoint speed after RK4 overstates travel at speed limits. Match
+    the tracker's bounded-acceleration model instead, with no endpoint clipping.
+    """
+    lower = jnp.minimum(cfg.MAX_ACCEL, (cfg.MIN_SPEED - x[3]) / cfg.DT)
+    upper = jnp.maximum(cfg.MIN_ACCEL, (cfg.MAX_SPEED - x[3]) / cfg.DT)
+    accel = jnp.clip(u[0], cfg.MIN_ACCEL, cfg.MAX_ACCEL)
+    return u.at[0].set(jnp.clip(accel, lower, upper))
 
 
 def apply_steering_delay(U, steering_prefix, steps):
@@ -707,7 +716,8 @@ def compensate_delay(x0, applied, cfg):
     dt = cfg.DELAY_COMPENSATION
     speed = float(np.clip(x[3] + a * dt, cfg.MIN_SPEED, cfg.MAX_SPEED))
     mean_speed = 0.5 * (x[3] + speed)
-    yaw = x[2] + mean_speed * np.tan(delta) / cfg.WB * dt
+    yaw = (x[2] + mean_speed * np.tan(delta + cfg.STEERING_OFFSET)
+           * cfg.STEERING_CURVATURE_GAIN / cfg.WB * dt)
     mean_yaw = 0.5 * (x[2] + yaw)
     return np.array([x[0] + mean_speed * np.cos(mean_yaw) * dt,
                      x[1] + mean_speed * np.sin(mean_yaw) * dt, yaw, speed])
@@ -863,8 +873,6 @@ class MPPI(Node):
         if self.get_parameter('tracker').value != 'none':
             if self.config.STEERING_DELAY_S:
                 raise ValueError('steering_delay_s requires tracker:=none')
-            if self.config.STEERING_CURVATURE_GAIN != 1.0 or self.config.STEERING_OFFSET:
-                raise ValueError('steering_curvature_gain/steering_offset require tracker:=none')
         delay_steps = self.config.steering_delay_steps
         self._steering_history = SentSteeringHistory(delay_steps, self.config.DT)
         self.get_logger().info(

@@ -97,7 +97,11 @@ class TrackerCorridorTest(unittest.TestCase):
         centers, radii = np.arange(8.).reshape(4, 2), np.full(4, .4)
         tracker._load_corridor((centers, radii), np.zeros((4, 4)))
         params = [call.args[2] for call in tracker.solver.set.call_args_list]
-        np.testing.assert_allclose(params, np.column_stack((centers, radii)))
+        params = np.asarray(params)
+        np.testing.assert_allclose(params[:, :3], np.column_stack((centers, radii)))
+        np.testing.assert_allclose(params[:, 3:], np.tile([
+            tracker.cfg.MIN_SPEED, tracker.cfg.MAX_SPEED,
+            tracker.cfg.STEERING_CURVATURE_GAIN, tracker.cfg.STEERING_OFFSET], (4, 1)))
         weights = tracker.solver.cost_set.call_args_list[0].args[2]
         self.assertEqual(weights[-1, -1], tracker.cfg.CORRIDOR_Q)
         self.assertEqual(weights[7, 7], 200.)  # steering change
@@ -116,6 +120,7 @@ class TrackerCorridorTest(unittest.TestCase):
         params = np.array([call.args[2] for call in tracker.solver.set.call_args_list])
         np.testing.assert_allclose(params[:, :2], nominal[:, :2])
         np.testing.assert_allclose(params[:, 2], INACTIVE_RADIUS)
+        self.assertEqual(params.shape, (4, 7))
         weights = tracker.solver.cost_set.call_args_list[0].args[2]
         self.assertEqual((weights[-1, -1], weights[7, 7]), (0.0, 10.0))
         self.assertTrue(np.all(np.diag(weights)[:3] > 0.))

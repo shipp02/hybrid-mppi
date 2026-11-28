@@ -4,12 +4,28 @@ from pathlib import Path
 import numpy as np
 
 
-def _bicycle_step(ca, x, u, cfg):
-    """Match MPPI's smooth bicycle integration (speed limits are constraints)."""
+def _bicycle_step(ca, x, u, cfg, parameters=None):
+    """Match MPPI's calibrated, bounded-acceleration kinematic integration.
+
+    Acceleration is limited once at the step's initial speed, before Euler/RK4.
+    The map is piecewise smooth at saturation; speed bounds remain OCP constraints.
+    """
+    if parameters is None:
+        speed_min, speed_max = cfg.MIN_SPEED, cfg.MAX_SPEED
+        curvature_gain, steering_offset = cfg.STEERING_CURVATURE_GAIN, cfg.STEERING_OFFSET
+    else:
+        speed_min, speed_max = parameters[0], parameters[1]
+        curvature_gain, steering_offset = parameters[2], parameters[3]
+    lower = ca.fmin(cfg.MAX_ACCEL, (speed_min - x[3]) / cfg.DT)
+    upper = ca.fmax(cfg.MIN_ACCEL, (speed_max - x[3]) / cfg.DT)
+    accel = ca.fmin(ca.fmax(u[0], cfg.MIN_ACCEL), cfg.MAX_ACCEL)
+    accel = ca.fmin(ca.fmax(accel, lower), upper)
+
     def flow(state):
         return ca.vertcat(state[3] * ca.cos(state[2]),
                           state[3] * ca.sin(state[2]),
-                          state[3] * ca.tan(u[1]) / cfg.WB, u[0])
+                          state[3] * ca.tan(u[1] + steering_offset)
+                          * curvature_gain / cfg.WB, accel)
 
     k1 = flow(x)
     if cfg.INTEGRATOR == 'euler':
@@ -41,10 +57,10 @@ def build_ocp(cfg, max_steer_rate, export_directory):
     # Last input is state, so first-stage slew includes last published command.
     model.x = ca.SX.sym('x', 6)
     model.u = ca.SX.sym('u', 2)
+    # Runtime parameters: corridor [cx, cy, r], speed limits, steering gain/offset.
+    model.p = ca.SX.sym('p', 7)
     model.disc_dyn_expr = ca.vertcat(
-        _bicycle_step(ca, model.x[:4], model.u, cfg), model.u)
-    # Corridor ball per stage, p = [cx, cy, r] (MPPI-IPDDP eq. 29).
-    model.p = ca.SX.sym('p', 3)
+        _bicycle_step(ca, model.x[:4], model.u, cfg, model.p[3:]), model.u)
     offset = model.x[:2] - model.p[:2]
     ball = ca.sumsqr(offset) - model.p[2] ** 2
     model.cost_y_expr = ca.vertcat(
@@ -71,7 +87,9 @@ def build_ocp(cfg, max_steer_rate, export_directory):
     ocp.cost.W_e = np.diag(TERMINAL_WEIGHTS)
     ocp.cost.yref = np.zeros(len(STAGE_WEIGHTS))
     ocp.cost.yref_e = np.zeros(len(TERMINAL_WEIGHTS))
-    ocp.parameter_values = np.array([0.0, 0.0, INACTIVE_RADIUS])
+    ocp.parameter_values = np.array([
+        0.0, 0.0, INACTIVE_RADIUS, cfg.MIN_SPEED, cfg.MAX_SPEED,
+        cfg.STEERING_CURVATURE_GAIN, cfg.STEERING_OFFSET])
     ocp.constraints.x0 = np.zeros(6)
     ocp.constraints.idxbu = np.array([0, 1])
     ocp.constraints.lbu = np.array([cfg.MIN_ACCEL, cfg.MIN_STEER])
@@ -170,7 +188,7 @@ class AcadosTracker:
         if (ocp.solver_options.N_horizon != self.cfg.H
                 or not np.isclose(ocp.solver_options.tf, self.cfg.H * self.cfg.DT)
                 or ocp.model.x.numel() != 6 or ocp.model.u.numel() != 2
-                or ocp.model.p.numel() != 3):
+                or ocp.model.p.numel() != 7):
             raise ValueError('Prebuilt solver horizon, timestep or dimensions do not match')
         for field in ('lbu', 'ubu', 'lh', 'uh', 'lh_0', 'uh_0', 'lh_e', 'uh_e', 'lbx', 'lbx_e'):
             if not np.allclose(getattr(ocp.constraints, field),
@@ -180,16 +198,22 @@ class AcadosTracker:
         for field in ('ubx', 'ubx_e'):
             if np.any(getattr(ocp.constraints, field) < getattr(expected.constraints, field)):
                 raise ValueError(f'Prebuilt solver speed bound below max_speed: {field}')
-        # Compare smooth discrete dynamics at multiple operating points, including turns.
+        # Compare discrete dynamics at turns and speed saturation boundaries.
         import casadi as ca
-        loaded_step = ca.Function('loaded_step', [ocp.model.x, ocp.model.u],
+        loaded_step = ca.Function('loaded_step', [ocp.model.x, ocp.model.u, ocp.model.p],
                                   [ocp.model.disc_dyn_expr])
-        expected_step = ca.Function('expected_step', [expected.model.x, expected.model.u],
-                                    [expected.model.disc_dyn_expr])
-        for yaw, speed, steer in ((0., 0., 0.), (0.3, 2., 0.1), (-0.7, 4., -0.2)):
+        expected_step = ca.Function(
+            'expected_step', [expected.model.x, expected.model.u, expected.model.p],
+            [expected.model.disc_dyn_expr])
+        probes = ((0., 0., 0., 0.4), (0.3, 2., 0.1, 0.4),
+                  (-0.7, 4., -0.2, 0.4),
+                  (0.2, self.cfg.MAX_SPEED, 0.1, self.cfg.MAX_ACCEL),
+                  (-0.2, self.cfg.MIN_SPEED, -0.1, self.cfg.MIN_ACCEL))
+        for yaw, speed, steer, accel in probes:
             state = [0., 0., yaw, speed, 0., 0.]
-            control = [0.4, steer]
-            if not np.allclose(loaded_step(state, control), expected_step(state, control),
+            control = [accel, steer]
+            if not np.allclose(loaded_step(state, control, expected.parameter_values),
+                               expected_step(state, control, expected.parameter_values),
                                rtol=1e-10, atol=1e-12):
                 raise ValueError('Prebuilt bicycle dynamics do not match runtime configuration')
         acados_root = Path(os.environ['ACADOS_SOURCE_DIR']).resolve()
@@ -242,8 +266,13 @@ class AcadosTracker:
             stage[-1] = self.cfg.CORRIDOR_STEER_RATE_WEIGHT  # steering change
         stage_w = np.diag(np.r_[stage, weight, weight])
         terminal_w = np.diag(np.r_[terminal, weight, weight])
+        dynamics = np.tile([
+            self.cfg.MIN_SPEED, self.cfg.MAX_SPEED,
+            self.cfg.STEERING_CURVATURE_GAIN, self.cfg.STEERING_OFFSET],
+            (self.cfg.H + 1, 1))
+        parameters = np.column_stack((balls, dynamics))
         for stage in range(self.cfg.H + 1):
-            self.solver.set(stage, 'p', balls[stage])
+            self.solver.set(stage, 'p', parameters[stage])
             self.solver.cost_set(stage, 'W', terminal_w if stage == self.cfg.H else stage_w)
 
     def _read_controls(self, previous_control):
