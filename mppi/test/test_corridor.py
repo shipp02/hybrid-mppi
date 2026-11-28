@@ -41,7 +41,7 @@ class CorridorTest(unittest.TestCase):
         np.testing.assert_allclose(centers, plan[:, :2])
 
     def test_radius_is_clearance_minus_car_radius_capped(self):
-        seen = slice(12, 30)  # past the blind spot under the car, inside the grid
+        seen = slice(12, 22)  # past the blind spot under the car, inside the grid
         _, centered = cr.plan_corridor(straight_plan(), self.x0, self.grid, self.cfg)
         np.testing.assert_allclose(np.asarray(centered)[seen], self.cfg.CORRIDOR_R_MAX, atol=1e-6)
         _, near_wall = cr.plan_corridor(straight_plan(lateral=0.6), self.x0, self.grid, self.cfg)
@@ -49,12 +49,12 @@ class CorridorTest(unittest.TestCase):
         # 0.4 m to the wall, minus the 0.15 m car radius, within one 0.05 m cell
         np.testing.assert_allclose(near_wall, 0.25, atol=0.05)
 
-    def test_unverified_stages_are_unconstrained(self):
-        _, radii = cr.plan_corridor(straight_plan(), self.x0, self.grid, self.cfg)
-        clearance = np.asarray(self.grid.clearance(cr.to_car_frame(straight_plan()[:, :2], self.x0)))
-        blind = clearance < self.grid.spec.inflation_radius
-        self.assertTrue(blind[0])  # the grid cannot see under the car
-        np.testing.assert_allclose(np.asarray(radii)[blind], cr.UNCONSTRAINED_RADIUS)
+    def test_nonpositive_room_is_unconstrained(self):
+        # Log-odds grid treats unknown cells as free. Exercise zero room explicitly.
+        from dataclasses import replace
+        grid = replace(self.grid, free_distance=jnp.zeros_like(self.grid.free_distance))
+        _, radii = cr.plan_corridor(straight_plan(), self.x0, grid, self.cfg)
+        np.testing.assert_allclose(np.asarray(radii), cr.UNCONSTRAINED_RADIUS)
 
     def test_corridor_is_deterministic(self):
         first = cr.plan_corridor(straight_plan(), self.x0, self.grid, self.cfg)

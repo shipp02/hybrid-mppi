@@ -26,6 +26,7 @@ class StopOnShutdownTest(unittest.TestCase):
 
     def make_node(self):
         node = object.__new__(c.MPPI)
+        node.config = c.MPPIConfig()
         node.drive_publisher = Mock()
         node.get_clock = Mock()
         node._last_tracker_action = node._last_drive_command = None

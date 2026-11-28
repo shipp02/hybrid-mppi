@@ -47,7 +47,8 @@ class ControlStepTest(unittest.TestCase):
             width=1.0, height=2.0, middle=(0.5, 0.3), resolution=0.2,
             num_beams=21, distance_cap=0.2, inflation_radius=0.1)
         x = np.linspace(0, 5, 51, dtype=np.float32)
-        self.course = controller.make_course(np.column_stack((x, x * 0, x * 0, x * 0 + 2)))
+        self.course = jax.device_put(controller.make_course(
+            np.column_stack((x, x * 0, x * 0, x * 0 + 2))))
         self.state = controller.ControllerState(
             jax.random.PRNGKey(7),
             jnp.full((self.cfg.H, self.cfg.NU), 0.05),

@@ -172,6 +172,12 @@ def trajectory_to_car_frame(ref_traj, x, y, yaw):
     )
 
 
+def trajectory_to_grid_frame(trajectory, fallback_pose, grid):
+    """Query accumulated evidence at its measured pose, not a predicted plan origin."""
+    pose = jnp.where(grid.has_pose, grid.pose, fallback_pose[:3])
+    return trajectory_to_car_frame(trajectory, pose[0], pose[1], pose[2])
+
+
 def cost_components(X, U, ref, cfg, grid):
     """Per-timestep objective terms shared by optimization and diagnostics."""
     tracked = db.tracking_state(X, cfg) if cfg.DYNAMICS == 'dynamic' else X
@@ -188,7 +194,8 @@ def cost_components(X, U, ref, cfg, grid):
     local_traj = trajectory_to_car_frame(X[1:], X[0, 0], X[0, 1], X[0, 2])
     
     # Evaluate collisions using the immutable JAX occupancy grid
-    obs_blocked = grid.is_free(local_traj)
+    grid_traj = trajectory_to_grid_frame(X[1:], X[0], grid)
+    obs_blocked = grid.is_free(grid_traj)
     # Arc length from the car to each rollout point, including the first segment.
     local_xy = jnp.concatenate((jnp.zeros((1, 2)), local_traj[:, :2]), axis=0)
     path_dist = jnp.cumsum(jnp.linalg.norm(jnp.diff(local_xy, axis=0), axis=1))
@@ -197,7 +204,7 @@ def cost_components(X, U, ref, cfg, grid):
     # Grows with how deep the body is inside the inflated zone: once the car is
     # inside it, every sample collides on its first steps, and a flat penalty left
     # no preference for the samples that leave the zone.
-    clearance = grid.clearance(local_traj)
+    clearance = grid.clearance(grid_traj)
     depth = jnp.maximum(grid.spec.inflation_radius - clearance, 0.0)
     # Keep timestep costs separate: mppi_update owns horizon/cost-to-go sums.
     obs_block_cost = cfg.OBSTACLE_WEIGHT * jnp.where(~obs_blocked, blocked_penalty * (1.0 + 20.0 * depth), 0.0)
@@ -209,7 +216,6 @@ def cost_components(X, U, ref, cfg, grid):
                         / (spec.distance_cap - spec.inflation_radius), 0.0, 1.0)
     clearance_cost = cfg.CLEARANCE_WEIGHT * nearness ** 2
     # obs_block_cost = 0.0
-
 
     # position error in the frame of the reference: [lag, lateral]. From rest the
     # reference runs ahead of the car, and a plain x/y error is then all lag,
@@ -343,7 +349,7 @@ def mppi_weights(S, cfg, mask=None):
 def plan_blocked_steps(U, x0, cfg, grid, steering_prefix=None):
     """How many rollout steps of U put the body inside an inflated obstacle zone."""
     nominal = simulate(x0, U, cfg, steering_prefix)
-    local = trajectory_to_car_frame(nominal[1:], x0[0], x0[1], x0[2])
+    local = trajectory_to_grid_frame(nominal[1:], x0, grid)
     return jnp.sum(~grid.is_free(local))
 
 
@@ -364,7 +370,8 @@ def brake_before_collision(U, x0, cfg, grid, steering_prefix=None):
     """
     nominal = simulate(x0, U, cfg, steering_prefix)
     local = trajectory_to_car_frame(nominal[1:], x0[0], x0[1], x0[2])
-    touching = grid.clearance(local) < 0.16
+    grid_traj = trajectory_to_grid_frame(nominal[1:], x0, grid)
+    touching = grid.clearance(grid_traj) < 0.16
     ahead = touching & (jnp.cumsum(~touching) > 0)     # after the first step out of contact
     xy = jnp.concatenate((jnp.zeros((1, 2)), local[:, :2]), axis=0)
     path_dist = jnp.cumsum(jnp.linalg.norm(jnp.diff(xy, axis=0), axis=1))
@@ -608,10 +615,11 @@ def prepare_warm_start(state, observation, cfg):
 def build_reference(x0, course, cfg):
     """Build a speed-ramped world-frame reference from the current pose."""
     v0 = jnp.hypot(x0[3], x0[4]) if cfg.DYNAMICS == 'dynamic' else x0[3]
-    if cfg.REFERENCE == 'quintic':
+    if isinstance(course, Course) and cfg.REFERENCE == 'quintic':
         return sample_quintic_reference(
             x0[0], x0[1], course.spline, cfg.DT, cfg.H, v0=v0, max_accel=cfg.MAX_ACCEL)
-    cx, cy, cyaw, cv = course.waypoints.T
+    waypoints = course.waypoints if isinstance(course, Course) else course
+    cx, cy, cyaw, cv = waypoints.T
     return calc_interpolated_ref_trajectory_gpu(
         x0[0], x0[1], cx, cy, cyaw, cv, cfg.DT, cfg.H, v0=v0, max_accel=cfg.MAX_ACCEL)
 
@@ -646,22 +654,25 @@ def select_control_outputs(solution, observation, reference, grid, cfg, export_p
 
 @partial(jax.jit, static_argnames=("cfg", "export_path", "export_top_paths"))
 def control_step(state, observation, course, grid, cfg, *, export_path=False,
-                 export_top_paths=False):
+                 export_top_paths=False, scan_pose=None):
     """One compiled dispatch; helpers preserve domain responsibility boundaries."""
     state = prepare_warm_start(state, observation, cfg)
     grid = grid.from_scan(
         observation.ranges, observation.range_max,
-        pose=observation.x0[:3], reset=observation.reset)
+        pose=observation.x0[:3] if scan_pose is None else scan_pose[:3],
+        reset=observation.reset)
     reference = build_reference(observation.x0, course, cfg)
     solution = optimize_controls(state, observation, reference, grid, cfg, export_top_paths)
     return select_control_outputs(solution, observation, reference, grid, cfg, export_path)
 
 
 @partial(jax.jit, static_argnames=("cfg", "export_top_paths"))
-def tracking_control_step(state, observation, course, grid, cfg, *, export_top_paths=False):
+def tracking_control_step(state, observation, course, grid, cfg, *, export_top_paths=False,
+                          scan_pose=None):
     """Keep optimization on device; export only selected nominal, never sample batch."""
     result = control_step(
-        state, observation, course, grid, cfg, export_top_paths=export_top_paths)
+        state, observation, course, grid, cfg, export_top_paths=export_top_paths,
+        scan_pose=scan_pose)
     nominal = simulate(observation.x0, result.state.U, cfg)
     return result, nominal
 
@@ -676,7 +687,8 @@ def corridor_control_step(state, observation, course, grid, cfg, scan_pose, *,
     a delay-compensated state).
     """
     result, nominal = tracking_control_step(
-        state, observation, course, grid, cfg, export_top_paths=export_top_paths)
+        state, observation, course, grid, cfg, export_top_paths=export_top_paths,
+        scan_pose=scan_pose)
     corridor = plan_corridor(nominal, scan_pose, result.grid, cfg)
     line = line_reference_along_plan(nominal, course.spline)
     return result._replace(reference=line), nominal, corridor
@@ -1129,7 +1141,6 @@ class MPPI(Node):
         """
         return (float(self.get_parameter('lidar_forward_offset').value), 0.0, 0.0)
 
-
     @staticmethod
     def _scan_geometry(scan):
         """Beam count and angular span of a cached scan."""
@@ -1233,7 +1244,8 @@ class MPPI(Node):
                 export_top_paths=self.publish_top_paths_enabled)
         result, nominal = tracking_control_step(
             self.control_state, planning, self.course, self.grid, self.config,
-            export_top_paths=self.publish_top_paths_enabled)
+            export_top_paths=self.publish_top_paths_enabled,
+            scan_pose=np.asarray(scan_pose, dtype=np.float32))
         return result, nominal, None
 
     def _feed_back_smoothed(self, tracked, corridor):

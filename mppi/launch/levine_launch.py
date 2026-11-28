@@ -34,7 +34,7 @@ PARAMETERS = {
     'speed_lead_time': 0.2,
     'brake_lead_time': 0.05,
     # sim odom is base_link (rear axle); sim.yaml mounts the LiDAR 0.275 m ahead
-    'lidar_offset': 0.275,
+    'lidar_forward_offset': 0.275,
 }
 
 
