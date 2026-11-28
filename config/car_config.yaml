@@ -43,6 +43,7 @@ mppi_node:
     publish_corridor: true         # MPPI/MPC clearance circles, /mppi/corridor, 2 Hz
     publish_occupancy_grid: true   # local obstacle grid, /mppi/occupancy_grid
     publish_top_paths: false       # 50 best samples + costs, /mppi/top_paths
+    profile_control_stages: true  # per-stage timing each second; adds GPU sync points
     path_frame: map
 
     # Map classification markers share publish_occupancy_grid switch; no effect

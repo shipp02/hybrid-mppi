@@ -11,6 +11,7 @@ import numpy as np
 
 from acados_tracker import AcadosTracker
 from controller_config import MPPIConfig
+from stage_profiler import StageProfiler
 
 GENERATED = Path(__file__).resolve().parents[1] / 'generated/acados_tracker'
 HAS_ACADOS = (importlib.util.find_spec('acados_template') is not None
@@ -55,6 +56,7 @@ class TrackerRuntimeConfigTest(unittest.TestCase):
             for library in libraries:
                 shutil.copy(library, root / library.name)
             tracker = AcadosTracker(cfg, max_steer_rate=.8, export_directory=root, generate=False)
+            tracker.profiler = StageProfiler(True)
             states = np.zeros((cfg.H + 1, 4))
             states[:, 0], states[:, 3] = np.arange(cfg.H + 1) * cfg.DT, 1.
             controls = np.tile([0., -cfg.STEERING_OFFSET], (cfg.H, 1))
@@ -65,6 +67,10 @@ class TrackerRuntimeConfigTest(unittest.TestCase):
             np.testing.assert_allclose(result, controls, atol=1e-5)
             predicted = np.array([tracker.solver.get(k, 'x') for k in range(cfg.H + 1)])
             np.testing.assert_allclose(predicted[:, 3], 1., atol=1e-5)
+            timings = tracker.profiler.drain()
+            self.assertGreater(timings['mpc.native_time_tot_sum'][1], 0.)
+            for iteration in range(1, cfg.CORRIDOR_SQP_ITERS + 1):
+                self.assertIn(f'mpc.solve_{iteration}', timings)
 
 
 if __name__ == '__main__':

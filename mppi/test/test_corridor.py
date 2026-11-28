@@ -220,6 +220,17 @@ class NodeCorridorTest(unittest.TestCase):
         np.testing.assert_allclose(node.control_state.U, [[0.5, 0.1], [0.4, 0.2]])  # Alg. 1
         np.testing.assert_array_equal(node._publish_drive.call_args.args[0], [0.5, 0.1])
 
+    def test_profiled_tracker_waits_for_plan_and_feedback(self):
+        node = self.make_node()
+        node.profiler = c.StageProfiler(True)
+        with patch.object(node.profiler, 'wait') as wait:
+            node._track_and_publish(self.observation(), None)
+        self.assertEqual(wait.call_count, 2)
+        stages = node.profiler.drain()
+        for stage in ('gpu.plan_complete', 'host.plan_readback', 'mpc.total',
+                      'host.feedback_upload', 'host.drive_publish', 'host.path_debug'):
+            self.assertIn(stage, stages)
+
     def test_other_modes_leave_mppi_mean_alone(self):
         node = self.make_node('spline')
         node._track_and_publish(self.observation(), None)

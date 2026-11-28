@@ -23,7 +23,7 @@ def load_controller():
     tree = ast.parse(path.read_text(), filename=str(path))
     allowed = {'dataclasses', 'functools', 'typing', 'time', 'jax', 'jax.numpy',
                'numpy', 'utils', 'occupancy_grid', 'controller_config', 'dynamic_bicycle',
-               'selected_path_publisher', 'os', 'quintic_spline', 'corridor'}
+               'selected_path_publisher', 'os', 'quintic_spline', 'corridor', 'stage_profiler'}
     tree.body = [node for node in tree.body
                  if isinstance(node, (ast.FunctionDef, ast.ClassDef))
                  or isinstance(node, ast.ImportFrom) and node.module in allowed

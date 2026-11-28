@@ -2,6 +2,7 @@
 from pathlib import Path
 
 import numpy as np
+from stage_profiler import StageProfiler
 
 
 def _bicycle_step(ca, x, u, cfg, parameters=None):
@@ -160,7 +161,9 @@ def prepare_reference(x0, states, controls, previous_control, cfg, reference=Non
 
 
 class AcadosTracker:
-    """Single RTI step, relinearized at fresh MPPI nominal on each control tick."""
+    """RTI iterations, relinearized at fresh MPPI nominal on each control tick."""
+
+    profiler = StageProfiler()  # disabled unless the host attaches its profiler
 
     def __init__(self, cfg, *, max_steer_rate=np.pi, export_directory=None,
                  generate=True):
@@ -306,12 +309,43 @@ class AcadosTracker:
         With a corridor, CORRIDOR_SQP_ITERS iterations: the first linearizes the
         ball at its center (zero gradient), the next ones enforce it.
         """
-        initial, nominal, controls, targets = prepare_reference(
-            x0, states, controls, previous_control, self.cfg, reference)
-        self._load_reference(initial, nominal, controls, targets)
-        self._load_corridor(corridor, nominal)
-        for _ in range(1 if corridor is None else self.cfg.CORRIDOR_SQP_ITERS):
-            status = self.solver.solve()
-            if status != 0:
-                raise RuntimeError(f'acados solve failed: status {status}')
-        return self._read_controls(previous_control)
+        with self.profiler.measure('mpc.prepare_reference'):
+            initial, nominal, controls, targets = prepare_reference(
+                x0, states, controls, previous_control, self.cfg, reference)
+        with self.profiler.measure('mpc.load_reference_and_limits'):
+            self._load_reference(initial, nominal, controls, targets)
+        with self.profiler.measure('mpc.load_corridor_parameters_weights'):
+            self._load_corridor(corridor, nominal)
+        with self.profiler.measure('mpc.solve_total'):
+            self._solve_iterations(1 if corridor is None else self.cfg.CORRIDOR_SQP_ITERS)
+        with self.profiler.measure('mpc.read_controls'):
+            return self._read_controls(previous_control)
+
+    def _solve_iterations(self, count):
+        """Time each RTI call; accumulate native stats across all calls this tick."""
+        native = dict.fromkeys(('time_tot', 'time_qp', 'time_lin'), 0.0)
+        try:
+            for iteration in range(count):
+                with self.profiler.measure(f'mpc.solve_{iteration + 1}'):
+                    status = self.solver.solve()
+                if self.profiler.enabled:
+                    with self.profiler.measure('mpc.read_native_stats'):
+                        self._accumulate_native_timings(native)
+                if status != 0:
+                    raise RuntimeError(f'acados solve failed: status {status}')
+        finally:
+            if self.profiler.enabled:
+                for name, seconds in native.items():
+                    if seconds is not None:
+                        self.profiler.record(f'mpc.native_{name}_sum', seconds)
+
+    def _accumulate_native_timings(self, totals):
+        """Unavailable diagnostic fields must never reject a drive command."""
+        for name, total in totals.items():
+            if total is None:
+                continue
+            try:
+                value = float(self.solver.get_stats(name))
+                totals[name] = total + value if np.isfinite(value) and value >= 0. else None
+            except (AttributeError, KeyError, TypeError, ValueError, RuntimeError):
+                totals[name] = None

@@ -39,6 +39,7 @@ install(PROGRAMS
   scripts/controller_config.py
   scripts/dynamic_bicycle.py
   scripts/selected_path_publisher.py
+  scripts/stage_profiler.py
   scripts/occupancy_grid.py
   scripts/map_obstacles.py
   scripts/map_obstacle_debug.py

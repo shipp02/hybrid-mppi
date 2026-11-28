@@ -28,6 +28,7 @@ import dynamic_bicycle as db
 import os
 from nav_msgs.msg import Odometry
 from selected_path_publisher import PathPublisherProcess, PUBLISH_PERIOD
+from stage_profiler import StageProfiler
 from sensor_msgs.msg import LaserScan
 from rclpy.time import Time
 from tf2_ros import Buffer, TransformListener, TransformException
@@ -859,6 +860,8 @@ class MPPI(Node):
     Implement Kinematic MPPI on the car
     This is just a template, you are free to implement your own node!
     """
+    profiler = StageProfiler()  # disabled fallback for standalone test instances
+
     def __init__(self):
         super().__init__('mppi_node')
         self._configure_device()
@@ -885,7 +888,11 @@ class MPPI(Node):
         # no race-line XY/yaw tracking. Smoothed controls seed the next MPPI step.
         if self.tracker_reference not in ('spline', 'nominal', 'corridor'):
             raise ValueError('tracker_reference must be spline, nominal or corridor')
+        self.declare_parameter('profile_control_stages', False)
+        self.profiler = StageProfiler(self.get_parameter('profile_control_stages').value)
         self.tracker = self._create_tracker()
+        if self.tracker is not None:
+            self.tracker.profiler = self.profiler
         self._last_tracker_action = np.zeros(2)
         self._last_drive_command = np.zeros(2)  # [steering, speed setpoint]
 
@@ -1198,14 +1205,18 @@ class MPPI(Node):
             return
         control_start = time.perf_counter()
         if self.tracker is None:
-            result = control_step(
-                self.control_state, observation, self.course, self.grid,
-                self.config, export_path=self.publish_selected_paths_enabled,
-                export_top_paths=self.publish_top_paths_enabled)
-            self._publish_control_result(result, observation, now)
+            with self.profiler.measure('gpu.direct_complete'):
+                result = control_step(
+                    self.control_state, observation, self.course, self.grid,
+                    self.config, export_path=self.publish_selected_paths_enabled,
+                    export_top_paths=self.publish_top_paths_enabled)
+                self.profiler.wait(result)
+            with self.profiler.measure('host.direct_readback_and_publish'):
+                self._publish_control_result(result, observation, now)
         else:
             result = self._track_and_publish(observation, now)
-        self._publish_metrics(observation, control_start, now, result.selection_metrics)
+        with self.profiler.measure('host.metrics'):
+            self._publish_metrics(observation, control_start, now, result.selection_metrics)
         self._log_control_stats(control_start)
 
     def _publish_metrics(self, observation, control_start, now, selection):
@@ -1224,28 +1235,40 @@ class MPPI(Node):
 
     def _track_and_publish(self, observation, now):
         """Plan on GPU, track on CPU, then publish one command."""
-        planning = observation._replace(x0=np.asarray(compensate_delay(
-            observation.x0, self._last_tracker_action, self.config), dtype=np.float32))
-        result, nominal, corridor = self._plan_for_tracker(planning, observation.x0)
+        with self.profiler.measure('host.delay_prediction'):
+            planning = observation._replace(x0=np.asarray(compensate_delay(
+                observation.x0, self._last_tracker_action, self.config), dtype=np.float32))
+        with self.profiler.measure('gpu.plan_complete'):
+            result, nominal, corridor = self._plan_for_tracker(planning, observation.x0)
+            self.profiler.wait((result, nominal, corridor))
         self.control_state, self.grid = result.state, result.grid
-        self._publish_occupancy_grid(observation, now)
-        states, controls, reference, corridor = jax.device_get(
-            (nominal, result.state.U, result.reference, corridor))
+        with self.profiler.measure('host.grid_debug'):
+            self._publish_occupancy_grid(observation, now)
+        with self.profiler.measure('host.plan_readback'):
+            states, controls, reference, corridor = jax.device_get(
+                (nominal, result.state.U, result.reference, corridor))
         target = None if self.tracker_reference == 'nominal' else reference
-        self._publish_corridor(corridor, now)
+        with self.profiler.measure('host.corridor_debug'):
+            self._publish_corridor(corridor, now)
         try:
-            tracked = self.tracker.solve(
-                planning.x0, states, controls, self._last_tracker_action, target, corridor)
+            with self.profiler.measure('mpc.total'):
+                tracked = self.tracker.solve(
+                    planning.x0, states, controls, self._last_tracker_action, target, corridor)
         except (RuntimeError, ValueError) as exc:
             self.get_logger().error(f'Tracker rejected command: {exc}', throttle_duration_sec=1.0)
-            self._publish_stop(now)
+            with self.profiler.measure('host.stop_publish'):
+                self._publish_stop(now)
             return result
-        self._last_tracker_action = tracked[0].copy()
-        self._feed_back_smoothed(tracked, corridor)
-        self._publish_drive(tracked[0], observation.x0, now)
-        if self.publish_selected_paths_enabled:
-            self.path_publisher.history.try_record(states[:, :2], now.nanoseconds)
-        self._publish_top_paths(result.top_paths, now)
+        with self.profiler.measure('host.feedback_upload'):
+            self._last_tracker_action = tracked[0].copy()
+            self._feed_back_smoothed(tracked, corridor)
+            self.profiler.wait(self.control_state.U)
+        with self.profiler.measure('host.drive_publish'):
+            self._publish_drive(tracked[0], observation.x0, now)
+        with self.profiler.measure('host.path_debug'):
+            if self.publish_selected_paths_enabled:
+                self.path_publisher.history.try_record(states[:, :2], now.nanoseconds)
+            self._publish_top_paths(result.top_paths, now)
         return result
 
     def _plan_for_tracker(self, planning, scan_pose):
@@ -1427,6 +1450,7 @@ class MPPI(Node):
             f'publish_selected_paths={self.publish_selected_paths_enabled}, '
             f'publish_top_paths={self.publish_top_paths_enabled}'
         )
+        self.profiler.log_summary(self.get_logger())
         self._control_latencies.clear()
         self._control_periods.clear()
         self._stats_window_start = end
