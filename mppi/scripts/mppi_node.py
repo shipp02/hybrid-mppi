@@ -1406,8 +1406,6 @@ class MPPI(Node):
             target_speed = kinematic_speed_setpoint(
                 self._last_drive_command[1], x0[3], float(action[0]), self.config)
 
-        if self.tracker is not None:
-            target_speed = speed_setpoint(x0, action, self.config)
         drive_msg.drive.speed = float(target_speed)
         self._send_drive_command(drive_msg)
 
