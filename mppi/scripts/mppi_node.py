@@ -1111,9 +1111,7 @@ class MPPI(Node):
                 self.config, export_path=self.publish_selected_paths_enabled,
                 export_top_paths=self.publish_top_paths_enabled)
         else:
-            result = tracking_control_step(
-                self.control_state, observation, self.course, self.grid, self.config,
-                export_top_paths=self.publish_top_paths_enabled)
+            result = self._plan_for_tracker(observation, observation.x0)
         jax.block_until_ready(result)
         self.get_logger().info(
             f'MPPI ready: JAX warmup took {time.perf_counter() - start:.3f} s; {self.config}')
