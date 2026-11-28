@@ -31,7 +31,10 @@ esac
 if (( $# )); then
   RUNS=("$@")
 else
-  mapfile -t RUNS < <(ssh "$HOST" "cd $REMOTE 2>/dev/null && ls -1d */ | tr -d / | sort")
+  RUNS=()
+  while IFS= read -r run; do
+    RUNS+=("$run")
+  done < <(ssh "$HOST" "cd $REMOTE 2>/dev/null && ls -1d */ | tr -d / | sort")
 fi
 if (( ${#RUNS[@]} == 0 )); then
   echo "No runs on $HOST:~/$REMOTE"

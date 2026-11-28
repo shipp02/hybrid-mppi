@@ -29,6 +29,9 @@ mppi_node:
 
     # ------------------------------------------------------------ localization & runtime
     # Map-frame pose (particle filter). Not /odom, which is wheel odometry only.
+    # Positive commands below motor breakaway speed are raised; zero still stops.
+    min_forward_speed: 0.25
+    # map-frame localization (particle filter); not /odom, which is wheel odometry
     odom_topic: /pf/pose/odom
     # Where the LiDAR sits ahead of the odom pose [m]. The particle filter pose IS
     # the laser frame, so 0. (A wrong offset shifts every obstacle by that much.)

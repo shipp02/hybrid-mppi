@@ -1,5 +1,13 @@
 # Build the acados tracker with colcon
 
+# Running
+
+```
+ros2 launch mppi car_launch.py planner:=cascade tracker:=acados max_speed:=2.0
+```
+```
+```
+
 ## Layout
 
 - `tools/generate_acados_tracker.py`: offline C/JSON generator; no compilation.
@@ -41,6 +49,7 @@ native C compilation does not install those Python dependencies.
 Source your ROS distribution, then:
 
 ```bash
+export ACADOS_SOURCE_DIR="$HOME/car_jax_setup/acados-0.6.0"
 export ACADOS_SOURCE_DIR="$HOME/acados"
 export LD_LIBRARY_PATH="$ACADOS_SOURCE_DIR/lib:$ACADOS_SOURCE_DIR/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
