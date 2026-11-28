@@ -101,7 +101,8 @@ class TrackerCorridorTest(unittest.TestCase):
         np.testing.assert_allclose(params[:, :3], np.column_stack((centers, radii)))
         np.testing.assert_allclose(params[:, 3:], np.tile([
             tracker.cfg.MIN_SPEED, tracker.cfg.MAX_SPEED,
-            tracker.cfg.STEERING_CURVATURE_GAIN, tracker.cfg.STEERING_OFFSET], (4, 1)))
+            tracker.cfg.STEERING_CURVATURE_GAIN, tracker.cfg.STEERING_OFFSET,
+            tracker.cfg.MIN_ACCEL, tracker.cfg.MAX_ACCEL, tracker.cfg.WB], (4, 1)))
         weights = tracker.solver.cost_set.call_args_list[0].args[2]
         self.assertEqual(weights[-1, -1], tracker.cfg.CORRIDOR_Q)
         self.assertEqual(weights[7, 7], 200.)  # steering change
@@ -120,7 +121,7 @@ class TrackerCorridorTest(unittest.TestCase):
         params = np.array([call.args[2] for call in tracker.solver.set.call_args_list])
         np.testing.assert_allclose(params[:, :2], nominal[:, :2])
         np.testing.assert_allclose(params[:, 2], INACTIVE_RADIUS)
-        self.assertEqual(params.shape, (4, 7))
+        self.assertEqual(params.shape, (4, 10))
         weights = tracker.solver.cost_set.call_args_list[0].args[2]
         self.assertEqual((weights[-1, -1], weights[7, 7]), (0.0, 10.0))
         self.assertTrue(np.all(np.diag(weights)[:3] > 0.))
@@ -130,6 +131,20 @@ class TrackerCorridorTest(unittest.TestCase):
         tracker._load_corridor((np.zeros((4, 2)), np.full(4, .4)), np.zeros((4, 4)))
         weights = tracker.solver.cost_set.call_args_list[0].args[2]
         np.testing.assert_array_equal(np.diag(weights)[-2:], .02)
+
+    def test_runtime_input_and_slew_limits_override_generated_values(self):
+        tracker = self.tracker(MIN_ACCEL=-2., MAX_ACCEL=1., MIN_STEER=-.2, MAX_STEER=.25)
+        tracker.max_steer_rate = .5
+        tracker._load_limits(1.)
+        calls = {(call.args[0], call.args[1]): call.args[2]
+                 for call in tracker.solver.constraints_set.call_args_list}
+        for stage in range(tracker.cfg.H):
+            np.testing.assert_array_equal(calls[stage, 'lbu'], [-2., -.2])
+            np.testing.assert_array_equal(calls[stage, 'ubu'], [1., .25])
+            self.assertEqual(calls[stage, 'lh'][0], -.025)
+            self.assertEqual(calls[stage, 'uh'][0], .025)
+        self.assertEqual(len(calls[0, 'lh']), 1)
+        self.assertEqual(len(calls[1, 'lh']), 2)
 
     def test_corridor_shape_is_checked(self):
         with self.assertRaisesRegex(ValueError, 'corridor'):

@@ -45,15 +45,19 @@ class GeneratedTrackerTest(unittest.TestCase):
         self.assertEqual(dims['nx'], cfg.NX + cfg.NU)
         self.assertEqual(dims['nu'], cfg.NU)
         self.assertAlmostEqual(options['tf'] / options['N_horizon'], cfg.DT)
-        self.assertEqual(self.payload['constraints']['lbu'],
-                         [cfg.MIN_ACCEL, cfg.MIN_STEER])
-        self.assertEqual(self.payload['constraints']['ubu'],
-                         [cfg.MAX_ACCEL, cfg.MAX_STEER])
-        self.assertGreaterEqual(self.payload['constraints']['ubx'][0], cfg.MAX_SPEED)
+        # Numerical limits are generation-time defaults, not a reuse contract.
+        constraints = self.payload['constraints']
+        self.assertEqual(len(constraints['lbu']), cfg.NU)
+        self.assertEqual(len(constraints['ubu']), cfg.NU)
+        self.assertTrue(all(lo <= hi for lo, hi in
+                            zip(constraints['lbu'], constraints['ubu'])))
+        self.assertEqual(len(constraints['lbx']), 1)
+        self.assertEqual(len(constraints['ubx']), 1)
         parameters = self.payload['parameter_values']
-        self.assertEqual(parameters[3], cfg.MIN_SPEED)
-        self.assertGreaterEqual(parameters[4], cfg.MAX_SPEED)
-        self.assertEqual(parameters[5:], [cfg.STEERING_CURVATURE_GAIN, cfg.STEERING_OFFSET])
+        self.assertEqual(len(parameters), 10)
+        self.assertLess(parameters[3], parameters[4])  # speed limits
+        self.assertLess(parameters[7], parameters[8])  # acceleration limits
+        self.assertGreater(parameters[9], 0.)  # wheelbase
 
     def test_first_step_steering_slew_is_constrained(self):
         constraints = self.payload['constraints']
@@ -63,8 +67,8 @@ class GeneratedTrackerTest(unittest.TestCase):
 
     def test_corridor_ball_is_a_soft_parametric_constraint(self):
         dims, constraints = self.payload['dims'], self.payload['constraints']
-        # [cx, cy, r, min_speed, max_speed, steering_gain, steering_offset]
-        self.assertEqual(dims['np'], 7)
+        # Corridor, speed limits, steering calibration, accel limits, wheelbase.
+        self.assertEqual(dims['np'], 10)
         self.assertEqual((dims['nh'], dims['nh_e'], dims['nsh'], dims['nsh_e']), (2, 1, 1, 1))
         self.assertEqual(constraints['uh'][1], 0.0)
         # a moderate lower bound: huge bounds wreck the interior-point QP's scaling

@@ -55,10 +55,10 @@ casadi_real casadi_sq(casadi_real x) { return x*x;}
 
 static const casadi_int casadi_s0[3] = {6, 1, 1};
 static const casadi_int casadi_s1[3] = {0, 1, 1};
-static const casadi_int casadi_s2[3] = {7, 1, 1};
+static const casadi_int casadi_s2[3] = {10, 1, 1};
 static const casadi_int casadi_s3[3] = {1, 1, 1};
 
-/* mppi_bicycle_tracker_constr_h_e_fun:(i0[6],i1[0],i2[0],i3[7])->(o0) */
+/* mppi_bicycle_tracker_constr_h_e_fun:(i0[6],i1[0],i2[0],i3[10])->(o0) */
 static int casadi_f0(const casadi_real** arg, casadi_real** res, casadi_int* iw, casadi_real* w, int mem) {
   casadi_real a0, a1, a2;
   a0=arg[0]? arg[0][0] : 0;

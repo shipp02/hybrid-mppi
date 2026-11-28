@@ -54,12 +54,12 @@ extern "C" {
 static const casadi_int casadi_s0[3] = {6, 1, 1};
 static const casadi_int casadi_s1[3] = {0, 1, 1};
 static const casadi_int casadi_s2[3] = {0, 0, 1};
-static const casadi_int casadi_s3[3] = {7, 1, 1};
+static const casadi_int casadi_s3[3] = {10, 1, 1};
 static const casadi_int casadi_s4[9] =
   {6, 6, 0, 0, 0, 0, 0, 0,
   0};
 
-/* mppi_bicycle_tracker_cost_y_e_hess:(i0[6],i1[0],i2[0],i3[6],i4[],i5[7])->(o0[6x6,0nz]) */
+/* mppi_bicycle_tracker_cost_y_e_hess:(i0[6],i1[0],i2[0],i3[6],i4[],i5[10])->(o0[6x6,0nz]) */
 static int casadi_f0(const casadi_real** arg, casadi_real** res, casadi_int* iw, casadi_real* w, int mem) {
   return 0;
 }

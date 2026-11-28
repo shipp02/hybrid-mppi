@@ -57,7 +57,8 @@ class KinematicLimitsTest(unittest.TestCase):
         for integrator in ('euler', 'rk4'):
             for maximum, gain, offset in ((2., 1., 0.), (6., 1.09245, .02)):
                 config = dict(INTEGRATOR=integrator, MAX_SPEED=maximum,
-                              STEERING_CURVATURE_GAIN=gain, STEERING_OFFSET=offset)
+                              STEERING_CURVATURE_GAIN=gain, STEERING_OFFSET=offset,
+                              MIN_ACCEL=-2., MAX_ACCEL=1.5, WB=.35)
                 for speed, accel in ((0., -3.), (.01, -3.), (1., .4),
                                      (maximum - .01, 3.), (maximum, 3.),
                                      (maximum + .5, 0.), (-.5, 0.)):
@@ -73,11 +74,12 @@ out = []
 for case in json.load(sys.stdin):
     config = case['config']
     cfg = MPPIConfig(INTEGRATOR=config['INTEGRATOR'])
-    x, u, p = ca.SX.sym('x', 4), ca.SX.sym('u', 2), ca.SX.sym('p', 4)
+    x, u, p = ca.SX.sym('x', 4), ca.SX.sym('u', 2), ca.SX.sym('p', 7)
     step = _bicycle_step(ca, x, u, cfg, p)
     fn = ca.Function('step', [x, u, p], [step])
     parameters = [0., config['MAX_SPEED'], config['STEERING_CURVATURE_GAIN'],
-                  config['STEERING_OFFSET']]
+                  config['STEERING_OFFSET'], config['MIN_ACCEL'], config['MAX_ACCEL'],
+                  config['WB']]
     out.append(list(map(float, fn(case['state'], case['control'], parameters).full().ravel())))
 print(json.dumps(out))
 '''

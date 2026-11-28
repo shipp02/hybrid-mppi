@@ -35,7 +35,6 @@ extern "C" {
 #define casadi_s2 CASADI_PREFIX(s2)
 #define casadi_s3 CASADI_PREFIX(s3)
 #define casadi_s4 CASADI_PREFIX(s4)
-#define casadi_s5 CASADI_PREFIX(s5)
 
 /* Symbol visibility in DLLs */
 #ifndef CASADI_SYMBOL_EXPORT
@@ -56,10 +55,9 @@ static const casadi_int casadi_s0[3] = {6, 1, 1};
 static const casadi_int casadi_s1[3] = {2, 1, 1};
 static const casadi_int casadi_s2[3] = {0, 1, 1};
 static const casadi_int casadi_s3[3] = {0, 0, 1};
-static const casadi_int casadi_s4[3] = {7, 1, 1};
-static const casadi_int casadi_s5[3] = {10, 1, 1};
+static const casadi_int casadi_s4[3] = {10, 1, 1};
 
-/* mppi_bicycle_tracker_cost_y_fun:(i0[6],i1[2],i2[0],i3[],i4[7])->(o0[10]) */
+/* mppi_bicycle_tracker_cost_y_fun:(i0[6],i1[2],i2[0],i3[],i4[10])->(o0[10]) */
 static int casadi_f0(const casadi_real** arg, casadi_real** res, casadi_int* iw, casadi_real* w, int mem) {
   casadi_real a0, a1, a2, a3, a4;
   a0=arg[0]? arg[0][0] : 0;
@@ -158,7 +156,7 @@ CASADI_SYMBOL_EXPORT const casadi_int* mppi_bicycle_tracker_cost_y_fun_sparsity_
 
 CASADI_SYMBOL_EXPORT const casadi_int* mppi_bicycle_tracker_cost_y_fun_sparsity_out(casadi_int i) {
   switch (i) {
-    case 0: return casadi_s5;
+    case 0: return casadi_s4;
     default: return 0;
   }
 }

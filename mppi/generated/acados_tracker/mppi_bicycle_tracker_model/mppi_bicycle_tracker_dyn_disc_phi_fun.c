@@ -71,9 +71,9 @@ casadi_real casadi_fmin(casadi_real x, casadi_real y) {
 
 static const casadi_int casadi_s0[3] = {6, 1, 1};
 static const casadi_int casadi_s1[3] = {2, 1, 1};
-static const casadi_int casadi_s2[3] = {7, 1, 1};
+static const casadi_int casadi_s2[3] = {10, 1, 1};
 
-/* mppi_bicycle_tracker_dyn_disc_phi_fun:(i0[6],i1[2],i2[7])->(o0[6]) */
+/* mppi_bicycle_tracker_dyn_disc_phi_fun:(i0[6],i1[2],i2[10])->(o0[6]) */
 static int casadi_f0(const casadi_real** arg, casadi_real** res, casadi_int* iw, casadi_real* w, int mem) {
   casadi_real a00, a01, a02, a03, a04, a05, a06, a07, a08, a09, a10, a11;
   casadi_real a12, a13, a14, a15, a16, a17, a18, a19;
@@ -85,9 +85,9 @@ static int casadi_f0(const casadi_real** arg, casadi_real** res, casadi_int* iw,
   a04=(a02*a04);
   a05=2.;
   a06=arg[1]? arg[1][0] : 0;
-  a07=-3.;
+  a07=arg[2]? arg[2][7] : 0;
   a08=casadi_fmax(a06,a07);
-  a09=3.;
+  a09=arg[2]? arg[2][8] : 0;
   a08=casadi_fmin(a08,a09);
   a10=arg[2]? arg[2][3] : 0;
   a10=(a10-a02);
@@ -109,7 +109,7 @@ static int casadi_f0(const casadi_real** arg, casadi_real** res, casadi_int* iw,
   a12=(a02*a11);
   a13=arg[2]? arg[2][5] : 0;
   a12=(a12*a13);
-  a14=3.3000000000000002e-01;
+  a14=arg[2]? arg[2][9] : 0;
   a12=(a12/a14);
   a15=(a01*a12);
   a15=(a15/a05);

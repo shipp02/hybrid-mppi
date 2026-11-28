@@ -13,19 +13,21 @@ def _bicycle_step(ca, x, u, cfg, parameters=None):
     if parameters is None:
         speed_min, speed_max = cfg.MIN_SPEED, cfg.MAX_SPEED
         curvature_gain, steering_offset = cfg.STEERING_CURVATURE_GAIN, cfg.STEERING_OFFSET
+        accel_min, accel_max, wheelbase = cfg.MIN_ACCEL, cfg.MAX_ACCEL, cfg.WB
     else:
         speed_min, speed_max = parameters[0], parameters[1]
         curvature_gain, steering_offset = parameters[2], parameters[3]
-    lower = ca.fmin(cfg.MAX_ACCEL, (speed_min - x[3]) / cfg.DT)
-    upper = ca.fmax(cfg.MIN_ACCEL, (speed_max - x[3]) / cfg.DT)
-    accel = ca.fmin(ca.fmax(u[0], cfg.MIN_ACCEL), cfg.MAX_ACCEL)
+        accel_min, accel_max, wheelbase = parameters[4], parameters[5], parameters[6]
+    lower = ca.fmin(accel_max, (speed_min - x[3]) / cfg.DT)
+    upper = ca.fmax(accel_min, (speed_max - x[3]) / cfg.DT)
+    accel = ca.fmin(ca.fmax(u[0], accel_min), accel_max)
     accel = ca.fmin(ca.fmax(accel, lower), upper)
 
     def flow(state):
         return ca.vertcat(state[3] * ca.cos(state[2]),
                           state[3] * ca.sin(state[2]),
                           state[3] * ca.tan(u[1] + steering_offset)
-                          * curvature_gain / cfg.WB, accel)
+                          * curvature_gain / wheelbase, accel)
 
     k1 = flow(x)
     if cfg.INTEGRATOR == 'euler':
@@ -47,6 +49,13 @@ CORRIDOR_LOWER = -150.0  # lower bound of (x-cx)^2 + (y-cy)^2 - r^2
 CORRIDOR_SLACK = (1e2, 1e4)  # L1 and L2 penalty on corridor violation
 
 
+def dynamics_parameters(cfg):
+    """Runtime model values in the generated solver's parameter order."""
+    return np.array([cfg.MIN_SPEED, cfg.MAX_SPEED,
+                     cfg.STEERING_CURVATURE_GAIN, cfg.STEERING_OFFSET,
+                     cfg.MIN_ACCEL, cfg.MAX_ACCEL, cfg.WB])
+
+
 def build_ocp(cfg, max_steer_rate, export_directory):
     """Generate discrete nonlinear OCP; acados differentiates it online for RTI."""
     import casadi as ca
@@ -57,8 +66,8 @@ def build_ocp(cfg, max_steer_rate, export_directory):
     # Last input is state, so first-stage slew includes last published command.
     model.x = ca.SX.sym('x', 6)
     model.u = ca.SX.sym('u', 2)
-    # Runtime parameters: corridor [cx, cy, r], speed limits, steering gain/offset.
-    model.p = ca.SX.sym('p', 7)
+    # Runtime parameters: [cx, cy, r] followed by dynamics_parameters(cfg).
+    model.p = ca.SX.sym('p', 10)
     model.disc_dyn_expr = ca.vertcat(
         _bicycle_step(ca, model.x[:4], model.u, cfg, model.p[3:]), model.u)
     offset = model.x[:2] - model.p[:2]
@@ -87,9 +96,7 @@ def build_ocp(cfg, max_steer_rate, export_directory):
     ocp.cost.W_e = np.diag(TERMINAL_WEIGHTS)
     ocp.cost.yref = np.zeros(len(STAGE_WEIGHTS))
     ocp.cost.yref_e = np.zeros(len(TERMINAL_WEIGHTS))
-    ocp.parameter_values = np.array([
-        0.0, 0.0, INACTIVE_RADIUS, cfg.MIN_SPEED, cfg.MAX_SPEED,
-        cfg.STEERING_CURVATURE_GAIN, cfg.STEERING_OFFSET])
+    ocp.parameter_values = np.r_[0.0, 0.0, INACTIVE_RADIUS, dynamics_parameters(cfg)]
     ocp.constraints.x0 = np.zeros(6)
     ocp.constraints.idxbu = np.array([0, 1])
     ocp.constraints.lbu = np.array([cfg.MIN_ACCEL, cfg.MIN_STEER])
@@ -179,7 +186,7 @@ class AcadosTracker:
                 ocp, generate=False, build=False, check_reuse_possible=False)
 
     def _load_formulation(self, directory):
-        """Relocate saved formulation and fail closed on incompatible runtime limits."""
+        """Check compiled structure/dynamics; numerical limits load at runtime."""
         import os
         from acados_template import AcadosOcp
 
@@ -188,16 +195,8 @@ class AcadosTracker:
         if (ocp.solver_options.N_horizon != self.cfg.H
                 or not np.isclose(ocp.solver_options.tf, self.cfg.H * self.cfg.DT)
                 or ocp.model.x.numel() != 6 or ocp.model.u.numel() != 2
-                or ocp.model.p.numel() != 7):
+                or ocp.model.p.numel() != 10):
             raise ValueError('Prebuilt solver horizon, timestep or dimensions do not match')
-        for field in ('lbu', 'ubu', 'lh', 'uh', 'lh_0', 'uh_0', 'lh_e', 'uh_e', 'lbx', 'lbx_e'):
-            if not np.allclose(getattr(ocp.constraints, field),
-                               getattr(expected.constraints, field)):
-                raise ValueError(f'Prebuilt solver limits do not match: {field}')
-        # speed bounds are reset per stage from cfg, so a higher built bound is fine
-        for field in ('ubx', 'ubx_e'):
-            if np.any(getattr(ocp.constraints, field) < getattr(expected.constraints, field)):
-                raise ValueError(f'Prebuilt solver speed bound below max_speed: {field}')
         # Compare discrete dynamics at turns and speed saturation boundaries.
         import casadi as ca
         loaded_step = ca.Function('loaded_step', [ocp.model.x, ocp.model.u, ocp.model.p],
@@ -233,12 +232,28 @@ class AcadosTracker:
         self.solver.set(self.cfg.H, 'yref', np.concatenate((targets[-1], np.zeros(2))))
         self.solver.set(0, 'lbx', initial)
         self.solver.set(0, 'ubx', initial)
-        # Permit bounded deceleration back into limits after noisy/out-of-range odometry.
+        self._load_limits(initial[3])
+
+    def _load_limits(self, initial_speed):
+        """Override reusable input, slew and speed bounds from runtime config."""
+        lower_u = np.array([self.cfg.MIN_ACCEL, self.cfg.MIN_STEER])
+        upper_u = np.array([self.cfg.MAX_ACCEL, self.cfg.MAX_STEER])
+        slew = self.max_steer_rate * self.cfg.DT
+        for stage in range(self.cfg.H):
+            self.solver.constraints_set(stage, 'lbu', lower_u)
+            self.solver.constraints_set(stage, 'ubu', upper_u)
+            lower_h = [-slew] if stage == 0 else [-slew, CORRIDOR_LOWER]
+            upper_h = [slew] if stage == 0 else [slew, 0.0]
+            self.solver.constraints_set(stage, 'lh', np.array(lower_h))
+            self.solver.constraints_set(stage, 'uh', np.array(upper_h))
+        self.solver.constraints_set(self.cfg.H, 'lh', np.array([CORRIDOR_LOWER]))
+        self.solver.constraints_set(self.cfg.H, 'uh', np.array([0.0]))
+        # Permit bounded recovery after noisy/out-of-range odometry.
         for stage in range(1, self.cfg.H + 1):
             lower = min(self.cfg.MIN_SPEED,
-                        initial[3] + stage * self.cfg.DT * self.cfg.MAX_ACCEL)
+                        initial_speed + stage * self.cfg.DT * self.cfg.MAX_ACCEL)
             upper = max(self.cfg.MAX_SPEED,
-                        initial[3] + stage * self.cfg.DT * self.cfg.MIN_ACCEL)
+                        initial_speed + stage * self.cfg.DT * self.cfg.MIN_ACCEL)
             self.solver.set(stage, 'lbx', np.array([lower]))
             self.solver.set(stage, 'ubx', np.array([upper]))
 
@@ -266,10 +281,7 @@ class AcadosTracker:
             stage[-1] = self.cfg.CORRIDOR_STEER_RATE_WEIGHT  # steering change
         stage_w = np.diag(np.r_[stage, weight, weight])
         terminal_w = np.diag(np.r_[terminal, weight, weight])
-        dynamics = np.tile([
-            self.cfg.MIN_SPEED, self.cfg.MAX_SPEED,
-            self.cfg.STEERING_CURVATURE_GAIN, self.cfg.STEERING_OFFSET],
-            (self.cfg.H + 1, 1))
+        dynamics = np.tile(dynamics_parameters(self.cfg), (self.cfg.H + 1, 1))
         parameters = np.column_stack((balls, dynamics))
         for stage in range(self.cfg.H + 1):
             self.solver.set(stage, 'p', parameters[stage])
