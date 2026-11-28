@@ -1,6 +1,6 @@
 """Hybrid MPPI-MPC: corridor, race-line target, solver corridor and node path."""
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import jax
 import jax.numpy as jnp
@@ -101,6 +101,13 @@ class TrackerCorridorTest(unittest.TestCase):
         weights = tracker.solver.cost_set.call_args_list[0].args[2]
         self.assertEqual(weights[-1, -1], tracker.cfg.CORRIDOR_Q)
         self.assertEqual(weights[7, 7], 200.)  # steering change
+        np.testing.assert_array_equal(np.diag(weights)[:3], 0.)
+        self.assertEqual(weights[3, 3], 5.5)  # retain MPPI speed target
+        self.assertGreater(weights[6, 6], 0.)  # acceleration change
+        terminal = tracker.solver.cost_set.call_args_list[-1].args[2]
+        np.testing.assert_array_equal(np.diag(terminal)[:3], 0.)
+        self.assertEqual(terminal[3, 3], 5.5)
+        self.assertEqual(weights[-1, -1], 0.)  # reference-free position by default
 
     def test_no_corridor_is_inactive_around_the_warm_start(self):
         tracker = self.tracker()
@@ -111,6 +118,13 @@ class TrackerCorridorTest(unittest.TestCase):
         np.testing.assert_allclose(params[:, 2], INACTIVE_RADIUS)
         weights = tracker.solver.cost_set.call_args_list[0].args[2]
         self.assertEqual((weights[-1, -1], weights[7, 7]), (0.0, 10.0))
+        self.assertTrue(np.all(np.diag(weights)[:3] > 0.))
+
+    def test_center_regularization_can_be_enabled_explicitly(self):
+        tracker = self.tracker(CORRIDOR_Q=.02)
+        tracker._load_corridor((np.zeros((4, 2)), np.full(4, .4)), np.zeros((4, 4)))
+        weights = tracker.solver.cost_set.call_args_list[0].args[2]
+        np.testing.assert_array_equal(np.diag(weights)[-2:], .02)
 
     def test_corridor_shape_is_checked(self):
         with self.assertRaisesRegex(ValueError, 'corridor'):
@@ -164,11 +178,23 @@ class NodeCorridorTest(unittest.TestCase):
     def observation(self):
         return c.ControlObservation(np.array([0., 0., 0., 1.], np.float32), None, 0.05, False)
 
-    def test_corridor_mode_tracks_line_in_corridor_and_feeds_back(self):
+    def test_corridor_payload_uses_mppi_nominal_without_spline_projection(self):
+        node = self.make_node()
+        nominal = jnp.array([[0., 0., .2, 1.], [.1, .1, .3, 1.1], [.2, .1, .3, 1.2]])
+        result = c.ControlResult(node.control_state, None, jnp.zeros(2), None)
+        balls = (nominal[:, :2], jnp.full(3, .5))
+        with patch.object(c, 'tracking_control_step', return_value=(result, nominal)), \
+                patch.object(c, 'plan_corridor', return_value=balls):
+            output, seed, _ = c.corridor_control_step.__wrapped__(
+                node.control_state, self.observation(), None, None, node.config, jnp.zeros(3))
+        np.testing.assert_array_equal(output.reference, nominal)
+        np.testing.assert_array_equal(seed, nominal)
+
+    def test_corridor_mode_preserves_mppi_targets_and_feeds_back(self):
         node = self.make_node()
         node._track_and_publish(self.observation(), None)
         args = node.tracker.solve.call_args.args
-        np.testing.assert_array_equal(args[4], np.ones((3, 4)))  # race line at plan progress
+        np.testing.assert_array_equal(args[4], np.ones((3, 4)))  # MPPI targets; XY/yaw unweighted
         np.testing.assert_array_equal(args[5][1], np.full(3, .5))  # corridor radii
         np.testing.assert_allclose(node.control_state.U, [[0.5, 0.1], [0.4, 0.2]])  # Alg. 1
         np.testing.assert_array_equal(node._publish_drive.call_args.args[0], [0.5, 0.1])

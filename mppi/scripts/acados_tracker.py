@@ -234,10 +234,14 @@ class AcadosTracker:
             balls = np.column_stack((centers, radii))
             weight = self.cfg.CORRIDOR_Q
         stage = np.array(STAGE_WEIGHTS[:-2])
+        terminal = np.array(TERMINAL_WEIGHTS[:-2])
         if corridor is not None:
+            # MPPI owns path selection; MPC smooths controls within its corridor.
+            stage[:3] = 0.0
+            terminal[:3] = 0.0
             stage[-1] = self.cfg.CORRIDOR_STEER_RATE_WEIGHT  # steering change
         stage_w = np.diag(np.r_[stage, weight, weight])
-        terminal_w = np.diag(np.r_[TERMINAL_WEIGHTS[:-2], weight, weight])
+        terminal_w = np.diag(np.r_[terminal, weight, weight])
         for stage in range(self.cfg.H + 1):
             self.solver.set(stage, 'p', balls[stage])
             self.solver.cost_set(stage, 'W', terminal_w if stage == self.cfg.H else stage_w)

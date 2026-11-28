@@ -22,7 +22,7 @@ from rclpy.signals import SignalHandlerOptions
 from utils import calc_interpolated_ref_trajectory_gpu, shift_sequence
 from quintic_spline import QuinticSpline, fit_quintic_spline, sample_quintic_reference
 import occupancy_grid as og
-from corridor import plan_corridor, line_reference_along_plan
+from corridor import plan_corridor
 import dynamic_bicycle as db
 
 import os
@@ -680,8 +680,9 @@ def tracking_control_step(state, observation, course, grid, cfg, *, export_top_p
 @partial(jax.jit, static_argnames=("cfg", "export_top_paths"))
 def corridor_control_step(state, observation, course, grid, cfg, scan_pose, *,
                           export_top_paths=False):
-    """Hybrid MPPI-MPC on device: coarse MPPI plan, the collision-free corridor
-    around it, and the MPC's task, the race line at the plan's progress.
+    """Build MPPI plan and clearance corridor for control smoothing on the host.
+
+    The nominal seeds the solver and supplies speed targets, not XY/yaw targets.
 
     scan_pose: measured pose the LiDAR grid was built at (the plan may start from
     a delay-compensated state).
@@ -690,8 +691,7 @@ def corridor_control_step(state, observation, course, grid, cfg, scan_pose, *,
         state, observation, course, grid, cfg, export_top_paths=export_top_paths,
         scan_pose=scan_pose)
     corridor = plan_corridor(nominal, scan_pose, result.grid, cfg)
-    line = line_reference_along_plan(nominal, course.spline)
-    return result._replace(reference=line), nominal, corridor
+    return result._replace(reference=nominal), nominal, corridor
 
 
 def compensate_delay(x0, applied, cfg):
@@ -873,8 +873,8 @@ class MPPI(Node):
         # MPC target: 'spline' tracks the sampled reference, 'nominal' the MPPI plan
         self.declare_parameter('tracker_reference', 'spline')
         self.tracker_reference = self.get_parameter('tracker_reference').value
-        # corridor: hybrid MPPI-MPC, the MPC tracks the race line inside a corridor
-        # around the MPPI plan and its solution warm-starts the next MPPI step
+        # corridor: smooth controls inside MPPI balls while preserving MPPI speed;
+        # no race-line XY/yaw tracking. Smoothed controls seed the next MPPI step.
         if self.tracker_reference not in ('spline', 'nominal', 'corridor'):
             raise ValueError('tracker_reference must be spline, nominal or corridor')
         self.tracker = self._create_tracker()

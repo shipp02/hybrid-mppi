@@ -1,8 +1,8 @@
-"""Clearance-based corridor around the MPPI plan, and the MPC's race-line target.
+"""Clearance-based corridor around MPPI and optional spline projection helpers.
 
 Hybrid MPPI-MPC after MPPI-IPDDP (Kim et al., arXiv 2208.02439): MPPI gives a
-coarse plan, a corridor of balls B_r(c) around it bounds where the smoothing MPC
-may go, and the MPC tracks the task (the race line) inside it.
+coarse plan, and balls B_r(c) around it softly constrain the smoothing MPC.
+Corridor mode preserves MPPI speed targets without tracking race-line XY/yaw.
 
 The paper inflates each ball by sampling (eq. 27). Here each ball keeps its center
 on the plan, c_t = p_t, and takes the largest collision-free radius directly from
